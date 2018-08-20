@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use hash::{Hashable, Algorithm};
+use hash::{Algorithm, Hashable};
 use merkle::MerkleTree;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -65,12 +65,12 @@ fn test_custom_merkle_hasher() {
     }));
 
     assert_eq!(
-        mt.as_slice()
+        mt.as_vec()
             .iter()
             .take(mt.leafs())
             .filter(|&&x| x.0 > 255)
             .count(),
         0
     );
-    assert_eq!(mt.as_slice().iter().filter(|&&x| x.0 > 65535).count(), 0);
+    assert_eq!(mt.as_vec().iter().filter(|&&x| x.0 > 65535).count(), 0);
 }

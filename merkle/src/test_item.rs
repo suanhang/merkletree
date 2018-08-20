@@ -1,9 +1,9 @@
 #![cfg(test)]
 #![allow(unsafe_code)]
 
-use std::slice;
+use hash::{Algorithm, Hashable};
 use std::mem;
-use hash::{Hashable, Algorithm};
+use std::slice;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
 pub struct Item(pub u64);
@@ -11,6 +11,17 @@ pub struct Item(pub u64);
 impl AsRef<[u8]> for Item {
     fn as_ref(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(mem::transmute(&self.0), 8) }
+    }
+}
+
+impl From<Vec<u8>> for Item {
+    fn from(val: Vec<u8>) -> Self {
+        assert!(val.len() == 8);
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&val[0..8]);
+        let val: u64 = unsafe { mem::transmute(arr) };
+
+        Item(val)
     }
 }
 
