@@ -21,6 +21,35 @@ use std::hash::Hasher;
 use std::iter::FromIterator;
 use test::Bencher;
 
+#[cfg(feature = "cpu-profile")]
+extern crate gperftools;
+#[cfg(feature = "cpu-profile")]
+use gperftools::profiler::PROFILER;
+
+#[cfg(feature = "cpu-profile")]
+#[inline(always)]
+fn start_profile(stage: &str) {
+    PROFILER
+        .lock()
+        .unwrap()
+        .start(format!("./{}.profile", stage))
+        .unwrap();
+}
+
+#[cfg(not(feature = "cpu-profile"))]
+#[inline(always)]
+fn start_profile(_stage: &str) {}
+
+#[cfg(feature = "cpu-profile")]
+#[inline(always)]
+fn stop_profile() {
+    PROFILER.lock().unwrap().stop().unwrap();
+}
+
+#[cfg(not(feature = "cpu-profile"))]
+#[inline(always)]
+fn stop_profile() {}
+
 #[derive(Copy, Clone)]
 struct A(Sha512);
 
@@ -92,7 +121,7 @@ fn tree_160() -> Vec<Hash512> {
 }
 
 fn tree_30000() -> Vec<Hash512> {
-    let mut values = vec![vec![0u8; 256]; 30000];
+    let mut values = vec![vec![0u8; 256]; 32768];
     let mut rng = rand::IsaacRng::new_unseeded();
 
     for mut v in &mut values {
@@ -166,7 +195,7 @@ fn bench_crypto_sha512_from_data_160_par(b: &mut Bencher) {
 }
 
 #[bench]
-fn bench_crypto_sha512_from_data_30000(b: &mut Bencher) {
+fn bench_crypto_sha512_from_data_30000_ser(b: &mut Bencher) {
     let values = tree_30000();
     b.iter(|| MerkleTree::<Hash512, A>::from_iter(values.clone()));
 }
@@ -174,7 +203,10 @@ fn bench_crypto_sha512_from_data_30000(b: &mut Bencher) {
 #[bench]
 fn bench_crypto_sha512_from_data_30000_par(b: &mut Bencher) {
     let values = tree_30000();
+
+    start_profile("build");
     b.iter(|| MerkleTree::<Hash512, A>::from_par_iter(values.clone()));
+    stop_profile();
 }
 
 #[bench]

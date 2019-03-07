@@ -1,9 +1,10 @@
 #![cfg(test)]
 
 use hash::*;
-use merkle::MerkleTree;
-use merkle::next_pow2;
 use merkle::log2_pow2;
+use merkle::next_pow2;
+use merkle::MerkleTree;
+use rayon::prelude::*;
 use std::fmt;
 use std::hash::Hasher;
 use std::iter::FromIterator;
@@ -209,6 +210,29 @@ fn test_simple_tree() {
         for i in 0..mt.leafs() {
             let p = mt.gen_proof(i);
             assert!(p.validate::<XOR128>());
+        }
+
+        if items == 8 {
+            let mt: MerkleTree<[u8; 16], XOR128> = MerkleTree::from_par_iter(
+                [1, 2, 3, 4, 5, 6, 7, 8]
+                    .par_iter()
+                    .map(|x| {
+                        let mut a = XOR128::new();
+                        x.hash(&mut a);
+                        a.hash()
+                    })
+                    .take(items),
+            );
+
+            assert_eq!(mt.leafs(), items);
+            assert_eq!(mt.height(), log2_pow2(next_pow2(mt.len())));
+            assert_eq!(mt.as_slice(), answer[items - 2].as_slice());
+            assert_eq!(mt[0], mt[0]);
+
+            for i in 0..mt.leafs() {
+                let p = mt.gen_proof(i);
+                assert!(p.validate::<XOR128>());
+            }
         }
     }
 }

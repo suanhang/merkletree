@@ -1,7 +1,22 @@
 use std::cmp::Ordering;
+use std::fmt;
 
 #[derive(Copy, Clone)]
 pub struct Hash512(pub [u8; 64]);
+
+impl fmt::Debug for Hash512 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Hash512({})",
+            self.0
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+                .concat()
+        )
+    }
+}
 
 impl Default for Hash512 {
     fn default() -> Self {

@@ -3,7 +3,7 @@ use proof::Proof;
 use rayon::prelude::*;
 use std::iter::FromIterator;
 use std::marker::PhantomData;
-use std::ops;
+use std::{fmt, ops};
 
 /// Merkle Tree.
 ///
@@ -37,14 +37,16 @@ use std::ops;
 ///
 /// TODO: Ord
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct MerkleTree<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> {
+pub struct MerkleTree<T: Ord + Clone + AsRef<[u8]> + Sync + Send + fmt::Debug, A: Algorithm<T>> {
     data: Vec<T>,
     leafs: usize,
     height: usize,
     _a: PhantomData<A>,
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, A> {
+impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send + fmt::Debug + Default, A: Algorithm<T>>
+    MerkleTree<T, A>
+{
     /// Creates new merkle from a sequence of hashes.
     pub fn new<I: IntoIterator<Item = T>>(data: I) -> MerkleTree<T, A> {
         Self::from_iter(data)
@@ -61,7 +63,91 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
     }
 
     #[inline]
-    fn build(&mut self) {
+    fn build(&mut self, parallel: bool) {
+        if !parallel || self.leafs < 8 {
+            self.build_serial();
+        } else {
+            self.build_par();
+        }
+    }
+
+    fn build_par(&mut self) {
+        let width = self.leafs;
+        assert!(width >= 8);
+        assert_eq!(
+            next_pow2(width),
+            self.leafs,
+            "only powers of two supported atm"
+        );
+
+        let (source, target) = self.data.split_at_mut(width);
+
+        // split the source data into 8 parts
+        let l = source.len() / 2;
+        let (s0123, s4567) = source.split_at_mut(l);
+
+        let (s01, s23) = s0123.split_at_mut(l / 2);
+        let (s45, s67) = s4567.split_at_mut(l / 2);
+
+        let (s0, s1) = s01.split_at_mut(l / 4);
+        let (s2, s3) = s23.split_at_mut(l / 4);
+        let (s4, s5) = s45.split_at_mut(l / 4);
+        let (s6, s7) = s67.split_at_mut(l / 4);
+
+        // split the target data into 8 parts
+        let l = target.len() / 2;
+        let (t0123, t4567) = target.split_at_mut(l);
+
+        let (t01, t23) = t0123.split_at_mut(l / 2);
+        let (t45, t67) = t4567.split_at_mut(l / 2);
+
+        let (t0, t1) = t01.split_at_mut(l / 4);
+        let (t2, t3) = t23.split_at_mut(l / 4);
+        let (t4, t5) = t45.split_at_mut(l / 4);
+        let (t6, t7) = t67.split_at_mut(l / 4);
+
+        // build the four subtrees
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s0, t0, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s1, t1, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s2, t2, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s3, t3, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s4, t4, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s5, t5, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s6, t6, a);
+            });
+            s.spawn(|_| {
+                let a = A::default();
+                build_tree(s7, t7, a);
+            });
+        });
+
+        // TODO: rearange memory, or adjust other methods
+
+        // TODO: build the top tree
+    }
+
+    fn build_serial(&mut self) {
         let mut width = self.leafs;
 
         // build tree
@@ -78,12 +164,16 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
             }
 
             // elements are in [i..j] and they are even
+            let mut a = A::default();
             let layer: Vec<_> = self.data[i..j]
-                .par_chunks(2)
-                .map(|v| A::default().node(v[0].clone(), v[1].clone(), height))
+                .chunks(2)
+                .map(|v| {
+                    a.reset();
+                    a.node(v[0].clone(), v[1].clone(), height)
+                })
                 .collect();
-
             self.data.extend(layer);
+
             i += j - i;
 
             width >>= 1;
@@ -172,8 +262,51 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
     }
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromParallelIterator<T>
-    for MerkleTree<T, A>
+fn build_tree<
+    T: Ord + Clone + AsRef<[u8]> + Send + Sync + Default + fmt::Debug,
+    A: Algorithm<T>,
+>(
+    source: &[T],
+    target: &mut [T],
+    mut a: A,
+) {
+    let mut width = source.len();
+    // build tree
+    let mut i: usize = 0;
+    let mut j: usize = width;
+    let mut height: usize = 0;
+
+    // first round reading from source, second need to read from target
+
+    while width > 1 {
+        if width == source.len() {
+            for (k, v) in source.chunks(2).enumerate() {
+                a.reset();
+                target[k] = a.node(v[0].clone(), v[1].clone(), height);
+            }
+
+            width >>= 1;
+            height += 1;
+            i = 0;
+            j = width;
+        } else {
+            let (source, target) = target.split_at_mut(j);
+
+            for (k, v) in source[i..].chunks(2).enumerate() {
+                a.reset();
+                target[k] = a.node(v[0].clone(), v[1].clone(), height);
+            }
+
+            i = j;
+            width >>= 1;
+            j += width;
+            height += 1;
+        }
+    }
+}
+
+impl<T: Ord + Clone + AsRef<[u8]> + Send + fmt::Debug + Sync + Default, A: Algorithm<T>>
+    FromParallelIterator<T> for MerkleTree<T, A>
 {
     /// Creates new merkle tree from an iterator over hashable objects.
     fn from_par_iter<I: IntoParallelIterator<Item = T>>(into: I) -> Self {
@@ -198,6 +331,8 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromParallelIt
         let size = 2 * pow - 1;
 
         assert!(leafs > 1);
+        data.resize(size, Default::default());
+
         let mut mt: MerkleTree<T, A> = MerkleTree {
             data,
             leafs,
@@ -205,14 +340,14 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromParallelIt
             _a: PhantomData,
         };
 
-        mt.build();
+        mt.build(true);
 
         mt
     }
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromIterator<T>
-    for MerkleTree<T, A>
+impl<T: Ord + Clone + AsRef<[u8]> + Send + fmt::Debug + Sync + Default, A: Algorithm<T>>
+    FromIterator<T> for MerkleTree<T, A>
 {
     /// Creates new merkle tree from an iterator over hashable objects.
     fn from_iter<I: IntoIterator<Item = T>>(into: I) -> Self {
@@ -228,10 +363,10 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromIterator<T
 
         // leafs
         let mut a = A::default();
-        for item in iter {
+        data.extend(iter.map(|item| {
             a.reset();
-            data.push(a.leaf(item));
-        }
+            a.leaf(item)
+        }));
 
         let leafs = data.len();
         let pow = next_pow2(leafs);
@@ -246,12 +381,14 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromIterator<T
             _a: PhantomData,
         };
 
-        mt.build();
+        mt.build(false);
         mt
     }
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> ops::Deref for MerkleTree<T, A> {
+impl<T: Ord + Clone + AsRef<[u8]> + Send + fmt::Debug + Sync, A: Algorithm<T>> ops::Deref
+    for MerkleTree<T, A>
+{
     type Target = [T];
 
     fn deref(&self) -> &[T] {
