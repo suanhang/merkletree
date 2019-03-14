@@ -44,7 +44,7 @@ pub struct MerkleTree<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T
     _a: PhantomData<A>,
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, A> {
+impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send + Default, A: Algorithm<T>> MerkleTree<T, A> {
     /// Creates new merkle from a sequence of hashes.
     pub fn new<I: IntoIterator<Item = T>>(data: I) -> MerkleTree<T, A> {
         Self::from_iter(data)
@@ -61,7 +61,7 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
     }
 
     #[inline]
-    fn build(&mut self) {
+    fn build(&mut self, parallel: bool) {
         let mut width = self.leafs;
 
         // build tree
@@ -78,12 +78,24 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
             }
 
             // elements are in [i..j] and they are even
-            let layer: Vec<_> = self.data[i..j]
-                .par_chunks(2)
-                .map(|v| A::default().node(v[0].clone(), v[1].clone(), height))
-                .collect();
+            if parallel {
+                let layer: Vec<_> = self.data[i..j]
+                    .par_chunks(2)
+                    .map(|v| A::default().node(v[0].clone(), v[1].clone(), height))
+                    .collect();
 
-            self.data.extend(layer);
+                self.data.extend(layer);
+            } else {
+                let len = self.data.len();
+                self.data.resize(len + (j - i) / 2, Default::default());
+                let (source, target) = self.data.split_at_mut(j);
+
+                let mut a = A::default();
+                for (k, v) in source[i..].chunks(2).enumerate() {
+                    a.reset();
+                    target[k] = a.node(v[0].clone(), v[1].clone(), height);
+                }
+            }
             i += j - i;
 
             width >>= 1;
@@ -172,7 +184,7 @@ impl<T: Ord + Clone + AsRef<[u8]> + Sync + Send, A: Algorithm<T>> MerkleTree<T, 
     }
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromParallelIterator<T>
+impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync + Default, A: Algorithm<T>> FromParallelIterator<T>
     for MerkleTree<T, A>
 {
     /// Creates new merkle tree from an iterator over hashable objects.
@@ -205,13 +217,13 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromParallelIt
             _a: PhantomData,
         };
 
-        mt.build();
+        mt.build(true);
 
         mt
     }
 }
 
-impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromIterator<T>
+impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync + Default, A: Algorithm<T>> FromIterator<T>
     for MerkleTree<T, A>
 {
     /// Creates new merkle tree from an iterator over hashable objects.
@@ -246,7 +258,7 @@ impl<T: Ord + Clone + AsRef<[u8]> + Send + Sync, A: Algorithm<T>> FromIterator<T
             _a: PhantomData,
         };
 
-        mt.build();
+        mt.build(false);
         mt
     }
 }
