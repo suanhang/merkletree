@@ -176,6 +176,9 @@ pub mod proof;
 /// Merkle tree abstractions, implementation and algorithms.
 pub mod merkle;
 
+// Streaming Merkle tree generator.
+pub mod streaming;
+
 #[cfg(test)]
 extern crate byteorder;
 
