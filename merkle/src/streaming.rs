@@ -64,9 +64,9 @@ where
         let mut tree = Self::new(leaves, sink);
 
         let mut a = A::default();
-        a.reset();
 
         for item in iter {
+            a.reset();
             tree.add_leaf(a.leaf(item))?;
         }
         Ok(tree)
