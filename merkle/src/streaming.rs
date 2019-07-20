@@ -55,6 +55,23 @@ where
         }
     }
 
+    pub fn from_iter<I: IntoIterator<Item = T>>(into: I, sink: S) -> Result<Self> {
+        let iter = into.into_iter();
+
+        let leaves = iter.size_hint().1.unwrap();
+        assert!(leaves > 1);
+
+        let mut tree = Self::new(leaves, sink);
+
+        let mut a = A::default();
+        a.reset();
+
+        for item in iter {
+            tree.add_leaf(a.leaf(item))?;
+        }
+        Ok(tree)
+    }
+
     pub fn add_leaf(&mut self, leaf: T) -> Result<Option<usize>> {
         if self.count >= self.leafs {
             return Ok(None);
