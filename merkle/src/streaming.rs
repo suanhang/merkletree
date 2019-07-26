@@ -1,4 +1,4 @@
-use std::io::{Read, Result, Seek, SeekFrom, Write};
+use std::io::{Result, Seek, SeekFrom, Write};
 
 use hash::Algorithm;
 use merkle::Element;
@@ -28,7 +28,7 @@ impl<T, A, S> MerkleStreamer<T, A, S>
 where
     T: Element,
     A: Algorithm<T>,
-    S: Read + Write + Seek,
+    S: Write + Seek,
 {
     pub fn new(size: usize, sink: S) -> Self {
         assert!(size > 0);
@@ -65,14 +65,16 @@ where
 
         let mut a = A::default();
 
+        let mut copy_buf = vec![0; T::byte_len()];
+
         for item in iter {
             a.reset();
-            tree.add_leaf(a.leaf(item))?;
+            tree.add_leaf(a.leaf(item), &mut copy_buf)?;
         }
         Ok(tree)
     }
 
-    pub fn add_leaf(&mut self, leaf: T) -> Result<Option<usize>> {
+    pub fn add_leaf(&mut self, leaf: T, copy_buf: &mut[u8]) -> Result<Option<usize>> {
         if self.count >= self.leafs {
             return Ok(None);
         }
@@ -80,7 +82,7 @@ where
         self.shift(leaf);
 
         let mut count = 0;
-        while self.reduce()? {
+        while self.reduce(copy_buf)? {
             count += 1
         }
 
@@ -102,7 +104,7 @@ where
         A::default().node(left.to_owned(), right.to_owned(), height)
     }
 
-    fn reduce(&mut self) -> Result<bool> {
+    fn reduce(&mut self, copy_buf: &mut[u8]) -> Result<bool> {
         if self.root_stack.len() > 1 {
             let top = self.root_stack.pop().expect("stack magically became empty");
             let next = self.root_stack.pop().expect("stack magically became empty");
@@ -114,12 +116,15 @@ where
                 let combined = Self::combine(&next.1, &top.1, top_height);
                 let new_height = top_height + 1;
 
-                self.data.write_all(next.1.as_ref())?;
-                self.data.write_all(top.1.as_ref())?;
+                next.1.copy_to_slice(copy_buf);
+                self.data.write_all(copy_buf)?;
+                top.1.copy_to_slice(copy_buf);
+                self.data.write_all(copy_buf)?;
 
                 if new_height == self.height {
                     // This is the final hash, the root of the tree.
-                    self.data.write_all(combined.as_ref())?;
+                    combined.copy_to_slice(copy_buf);
+                    self.data.write_all(copy_buf)?;
                 } else {
                     self.root_stack.push(Root(new_height, combined));
                 };
@@ -139,12 +144,13 @@ where
 
     fn read_position(&mut self, position: usize) -> Result<T> {
         let l = T::byte_len();
-        let mut buf = vec![0; l];
+        let buf = vec![0; l];
 
         self.data.seek(SeekFrom::Start((l * position) as u64))?;
-        self.data.read_exact(&mut buf)?;
+        // self.data.read_exact(&mut buf)?;
+        unimplemented!("We do not support the Read trait to benchmark using a buffered reader");
 
-        Ok(T::from_slice(&buf))
+        // Ok(T::from_slice(&buf))
     }
 
     fn read_at(&mut self, index: usize) -> Result<T> {
@@ -357,72 +363,6 @@ mod tests {
         #[inline]
         fn reset(&mut self) {
             *self = XOR::new();
-        }
-    }
-
-    #[test]
-    fn test_streamer() {
-        for i in 2..8 {
-            let s = 1 << i;
-            let d: Vec<u8> = Vec::with_capacity(s);
-
-            let mut buf = Cursor::new(d);
-
-            let mut m: MerkleStreamer<_, XOR, _> = MerkleStreamer::new(s, &mut buf);
-
-            for j in 0..s {
-                let leaf = [j as u8; SIZE];
-                assert!(m.add_leaf(leaf).unwrap().is_some());
-            }
-
-            let mut stored = Vec::new();
-            m.data.seek(SeekFrom::Start(0)).unwrap();
-            m.data.read_to_end(&mut stored).unwrap();
-
-            assert_eq!(if s == 1 { 0 } else { SIZE * ((2 * s) - 1) }, stored.len());
-
-            for elt in 0..s {
-                let found = m.read_at(elt).unwrap();
-                assert_eq!([elt as u8; SIZE], found);
-            }
-        }
-    }
-
-    #[test]
-    fn test_position() {
-        let positions = (0..16).map(position).collect::<Vec<_>>();
-
-        assert_eq!(
-            vec![0, 1, 2, 3, 6, 7, 8, 9, 14, 15, 16, 17, 20, 21, 22, 23],
-            positions,
-        );
-    }
-
-    #[test]
-    fn test_proof() {
-        for i in 2..10 {
-            let s = 1 << i;
-            let d: Vec<u8> = Vec::with_capacity(s);
-
-            let mut buf = Cursor::new(d);
-
-            let mut m: MerkleStreamer<Item, XOR, _> = MerkleStreamer::new(s, &mut buf);
-
-            for j in 0..s {
-                let leaf = [j as u8; SIZE];
-                m.add_leaf(leaf).unwrap();
-            }
-
-            let mut stored = Vec::new();
-            m.data.seek(SeekFrom::Start(0)).unwrap();
-            m.data.read_to_end(&mut stored).unwrap();
-
-            for elt in 0..s {
-                let proof = m.gen_proof(elt).unwrap();
-
-                assert!(proof.validate::<XOR>());
-                assert_eq!(m.root().unwrap(), proof.root());
-            }
         }
     }
 }

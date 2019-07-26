@@ -20,7 +20,7 @@ use merkletree::streaming::MerkleStreamer;
 use rand::Rng;
 use rayon::prelude::*;
 use std::hash::Hasher;
-use std::io::Cursor;
+use std::io::{Cursor, BufWriter};
 use std::iter::FromIterator;
 use tempfile::tempfile;
 use test::Bencher;
@@ -296,7 +296,7 @@ fn bench_crypto_sha512_from_data_131072_build_streaming(b: &mut Bencher) {
 #[bench]
 fn bench_crypto_sha512_from_data_131072_build_streaming_disk(b: &mut Bencher) {
     let values = tree_131072();
-    b.iter(|| MerkleStreamer::<Hash512, A, _>::from_iter(values.clone(), tempfile().unwrap()));
+    b.iter(|| MerkleStreamer::<Hash512, A, _>::from_iter(values.clone(), BufWriter::new(tempfile().unwrap())));
     // FIXME: Use a buffered writer once the `Read` trait is removed from `data`.
 }
 
