@@ -1,4 +1,4 @@
-//! cargo bench --features "crypto_bench" --verbose
+//! cargo +nightly bench --features "crypto_bench" --verbose
 #![cfg(feature = "crypto_bench")]
 #![feature(test)]
 
@@ -8,6 +8,7 @@ extern crate crypto;
 extern crate merkletree;
 extern crate rand;
 extern crate rayon;
+extern crate tempfile;
 extern crate test;
 
 use crypto::digest::Digest;
@@ -21,6 +22,7 @@ use rayon::prelude::*;
 use std::hash::Hasher;
 use std::io::Cursor;
 use std::iter::FromIterator;
+use tempfile::tempfile;
 use test::Bencher;
 
 #[derive(Copy, Clone)]
@@ -113,6 +115,25 @@ fn tree_30000() -> Vec<Hash512> {
 
 fn tree_32768() -> Vec<Hash512> {
     let mut values = vec![vec![0u8; 256]; 32768];
+    let mut rng = rand::IsaacRng::new_unseeded();
+
+    for mut v in &mut values {
+        rng.fill_bytes(&mut v);
+    }
+
+    values
+        .par_iter()
+        .map(|x| {
+            let mut a = A::new();
+            a.write(x.as_ref());
+            a.hash()
+        })
+        .collect::<Vec<Hash512>>()
+}
+
+// FIXME: Can the size be a parameter of the benchmark?
+fn tree_131072() -> Vec<Hash512> {
+    let mut values = vec![vec![0u8; 256]; 131072];
     let mut rng = rand::IsaacRng::new_unseeded();
 
     for mut v in &mut values {
@@ -257,6 +278,26 @@ fn bench_crypto_sha512_from_data_32768_streaming(b: &mut Bencher) {
     let values = tree_32768();
     let out = Cursor::new(Vec::with_capacity((32768 - 1) * 512));
     b.iter(|| MerkleStreamer::<Hash512, A, _>::from_iter(values.clone(), out.clone()));
+}
+
+#[bench]
+fn bench_crypto_sha512_from_data_131072_build_vec(b: &mut Bencher) {
+    let values = tree_131072();
+    b.iter(|| MerkleTree::<Hash512, A, VecStore<_>>::from_iter(values.clone()));
+}
+
+#[bench]
+fn bench_crypto_sha512_from_data_131072_build_streaming(b: &mut Bencher) {
+    let values = tree_131072();
+    let out = Cursor::new(Vec::with_capacity((131072 - 1) * 512));
+    b.iter(|| MerkleStreamer::<Hash512, A, _>::from_iter(values.clone(), out.clone()));
+}
+
+#[bench]
+fn bench_crypto_sha512_from_data_131072_build_streaming_disk(b: &mut Bencher) {
+    let values = tree_131072();
+    b.iter(|| MerkleStreamer::<Hash512, A, _>::from_iter(values.clone(), tempfile().unwrap()));
+    // FIXME: Use a buffered writer once the `Read` trait is removed from `data`.
 }
 
 #[bench]
