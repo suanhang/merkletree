@@ -3,6 +3,7 @@ use memmap::MmapMut;
 use memmap::MmapOptions;
 use proof::Proof;
 use rayon::prelude::*;
+use std::io::{self, Write, Seek, SeekFrom};
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::iter::FromIterator;
@@ -84,7 +85,7 @@ pub trait Element: Ord + Clone + AsRef<[u8]> + Sync + Send + Default + std::fmt:
 
 /// Backing store of the merkle tree.
 pub trait Store<E: Element>:
-    ops::Deref<Target = [E]> + std::fmt::Debug + Clone + Send + Sync
+    ops::Deref<Target = [E]> + std::fmt::Debug + Clone + Send + Sync + Write + Seek
 {
     /// Creates a new store which can store up to `size` elements.
     // FIXME: Return errors on failure instead of panicking
@@ -198,6 +199,25 @@ impl<E: Element> Store<E> for VecStore<E> {
 
     fn try_offload(&self) -> bool {
         false
+    }
+}
+
+impl<E: Element> Seek for VecStore<E> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let result: u64;
+        result = 0;
+        Ok(result)
+    }
+}
+
+impl<E: Element> Write for VecStore<E> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let result = 0;
+        Ok(result)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -321,6 +341,22 @@ impl<E: Element> Clone for MmapStore<E> {
             self.store.len() / E::byte_len(),
             &self.store[..(self.len() * E::byte_len())],
         )
+    }
+}
+
+impl<E: Element> Seek for MmapStore<E> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        unimplemented!("");
+    }
+}
+
+impl<E: Element> Write for MmapStore<E> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        unimplemented!("");
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -573,6 +609,22 @@ impl<E: Element> DiskMmapStore<E> {
 impl<E: Element> Clone for DiskMmapStore<E> {
     fn clone(&self) -> DiskMmapStore<E> {
         unimplemented!("We can't clone a mmap with an already associated file");
+    }
+}
+
+impl<E: Element> Seek for DiskMmapStore<E> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        unimplemented!("");
+    }
+}
+
+impl<E: Element> Write for DiskMmapStore<E> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        unimplemented!("");
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -831,7 +883,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
     /// Generate merkle tree inclusion proof for leaf `i`
     #[inline]
-    pub fn gen_proof(&self, i: usize) -> Proof<T> {
+    pub fn gen_proof(&mut self, i: usize) -> Proof<T> {
         assert!(i < self.leafs); // i in [0 .. self.leafs)
 
         let mut lemma: Vec<T> = Vec::with_capacity(self.height + 1); // path + root
@@ -908,7 +960,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
     /// Returns merkle root
     #[inline]
-    pub fn read_at(&self, i: usize) -> T {
+    pub fn read_at(&mut self, i: usize) -> T {
         if i < self.leaves.len() {
             self.leaves.read_at(i)
         } else {

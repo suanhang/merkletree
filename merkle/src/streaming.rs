@@ -1,14 +1,18 @@
 use std::io::{Read, Result, Seek, SeekFrom, Write};
 
-use hash::Algorithm;
+use hash::{Algorithm, Hashable};
 use merkle::Element;
 use proof::Proof;
 use std::marker::PhantomData;
 
+use std::iter::FromIterator;
+
+// Root is the root of the *sub-tree* of which this `T` is the root,
+// indexed by height.
 #[derive(Debug, Clone)]
 struct Root<T>(usize, T);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MerkleStreamer<T, A, S>
 where
     T: Element,
@@ -16,9 +20,12 @@ where
     S: Write + Seek,
 {
     max_stack: usize,
+    // STACK. Holds subsequent roots within an invariant that **no
+    // root is ever placed on top of a root with lower height**.
     root_stack: Vec<Root<T>>,
     leafs: usize,
     height: usize,
+    // OUTPUT of the processed elements (where popped things go).
     data: S,
     count: usize,
     _a: PhantomData<A>,
@@ -72,6 +79,17 @@ where
         Ok(tree)
     }
 
+    /// Creates new merkle tree from a list of hashable objects.
+    pub fn from_data<O: Hashable<A>, I: IntoIterator<Item = O>>(data: I) -> MerkleStreamer<T, A, S> {
+        unimplemented!("");
+        // let mut a = A::default();
+        // Self::from_iter(data.into_iter().map(|x| {
+        //     a.reset();
+        //     x.hash(&mut a);
+        //     a.hash()
+        // }))
+    }
+
     pub fn add_leaf(&mut self, leaf: T) -> Result<Option<usize>> {
         if self.count >= self.leafs {
             return Ok(None);
@@ -85,6 +103,10 @@ where
         }
 
         Ok(Some(count))
+    }
+
+    pub fn len(&self) -> usize {
+        unimplemented!("");
     }
 
     fn shift(&mut self, elt: T) {
@@ -137,30 +159,35 @@ where
         }
     }
 
-    fn read_position(&mut self, position: usize) -> Result<T> {
+    fn read_position(&mut self, position: usize) -> T {
         let l = T::byte_len();
         let mut buf = vec![0; l];
 
-        self.data.seek(SeekFrom::Start((l * position) as u64))?;
-        self.data.read_exact(&mut buf)?;
+        self.data.seek(SeekFrom::Start((l * position) as u64)).unwrap();
+        self.data.read_exact(&mut buf).unwrap();
+        // FIXME: Handle errors.
 
-        Ok(T::from_slice(&buf))
+        T::from_slice(&buf)
     }
 
-    fn read_at(&mut self, index: usize) -> Result<T> {
+    pub fn read_at(&mut self, index: usize) -> T {
         let p = position(index);
 
         self.read_position(p)
     }
 
-    fn root(&mut self) -> Result<T> {
+    pub fn root(&mut self) -> T {
         // TODO: Ensure this won't return the wrong value if tree hasn't been fully built yet.
         let root_position = (1 << (1 + self.height)) - 2;
 
         self.read_position(root_position)
     }
 
-    pub fn gen_proof(&mut self, i: usize) -> Result<Proof<T>> {
+    pub fn read_into(&self, pos: usize, buf: &mut [u8]) {
+        unimplemented!("");
+    }
+
+    pub fn gen_proof(&mut self, i: usize) -> Proof<T> {
         assert!(self.height > 1);
         assert!(i < self.leafs); // i in [0 .. self.leafs)
 
@@ -171,16 +198,16 @@ where
         let mut row_index = i;
 
         // Read and record the leaf.
-        lemma.push(self.read_at(i)?);
+        lemma.push(self.read_at(i));
         {
             // Find the leaf's hash partner.
             let is_left = row_index & 1 == 0;
             lemma.push(if is_left {
                 // j is left
-                self.read_at(row_index + 1)?
+                self.read_at(row_index + 1)
             } else {
                 // j is right
-                self.read_at(row_index - 1)?
+                self.read_at(row_index - 1)
             });
 
             // Record the first path bit;
@@ -193,7 +220,7 @@ where
             // How do we get to the next hash partner from current position?
             position += offset_to_next_proof_position(row_index, height);
             // Get and record the hash partner.
-            lemma.push(self.read_position(position)?);
+            lemma.push(self.read_position(position));
 
             // Find the row index (on the next row up) of the next hash partner.
             row_index = shift_and_flip(row_index);
@@ -204,7 +231,7 @@ where
             height += 1;
         }
 
-        lemma.push(self.root()?);
+        lemma.push(self.root());
 
         debug_assert!(lemma.len() == path.len() + 2);
         // TODO: These assertions from merkle.rs fail, but it's unclear why they are expected to succeed.
@@ -213,7 +240,14 @@ where
         // debug_assert!(lemma.len() == self.height + 1);
         // debug_assert!(path.len() == self.height - 1);
 
-        Ok(Proof::new(lemma, path))
+        Proof::new(lemma, path)
+    }
+}
+
+impl<T: Element, A: Algorithm<T>, K: Write + Seek> FromIterator<T> for MerkleStreamer<T, A, K> {
+    /// Creates new merkle tree from an iterator over hashable objects.
+    fn from_iter<I: IntoIterator<Item = T>>(into: I) -> Self {
+        unimplemented!("");
     }
 }
 
