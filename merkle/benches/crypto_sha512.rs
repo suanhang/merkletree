@@ -281,9 +281,9 @@ fn bench_crypto_sha512_from_data_32768_streaming(b: &mut Bencher) {
 }
 
 #[bench]
-fn bench_crypto_sha512_from_data_131072_build_vec(b: &mut Bencher) {
+fn bench_crypto_sha512_from_data_131072_build_par_vec(b: &mut Bencher) {
     let values = tree_131072();
-    b.iter(|| MerkleTree::<Hash512, A, VecStore<_>>::from_iter(values.clone()));
+    b.iter(|| MerkleTree::<Hash512, A, VecStore<_>>::from_par_iter(values.clone()));
 }
 
 #[bench]
