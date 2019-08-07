@@ -5,6 +5,7 @@ use proof::Proof;
 use rayon::prelude::*;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::{self, Index};
@@ -116,6 +117,13 @@ pub trait Store<E: Element>:
     // manually reload).
     // Returns `true` if it was able to comply.
     fn try_offload(&self) -> bool;
+
+    // Sync contents to disk (if it exists). This function is used to avoid
+    // unnecessary flush calls at the cost of added code complexity.
+    // FIXME: Check all the places where we write in the store to evaluate
+    //  where to sync.
+    fn sync(&self) {
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +584,224 @@ impl<E: Element> Clone for DiskMmapStore<E> {
     }
 }
 
+/// Disk-only store use to reduce memory to the minimum at the cost of build
+/// time performance. Copied from `DiskMmapStore`, most of its I/O logic is
+/// in the `store_copy_from_slice` and `store_read_range` functions.
+// FIXME: Define a file API (integrate it with `DiskMmapStore`), using temp files for now.
+// FIXME: Evaluate if a buffered writer is needed, we already always write
+//  blocks of `chunk_size` (1024) at a time.
+#[derive(Debug)]
+pub struct DiskStore<E: Element> {
+    len: usize,
+    _e: PhantomData<E>,
+    file: Arc<RwLock<File>>,
+    // FIXME: Using `Arc/``RwLock` this to allow reads without mutable
+    //  reference (because seeking changes the state of the file).
+
+    // We cache the `store.len()` call to avoid accessing the store when
+    // it's offloaded. Not to be confused with `len`, this saves the total
+    // size of the `store` and the other one keeps track of used `E` slots
+    // in the `DiskStore`.
+    store_size: usize,
+    // FIXME: Probably not needed here.
+}
+
+impl<E: Element> ops::Deref for DiskStore<E> {
+    type Target = [E];
+
+    fn deref(&self) -> &Self::Target {
+        unimplemented!()
+    }
+}
+
+impl<E: Element> Store<E> for DiskStore<E> {
+    #[allow(unsafe_code)]
+    fn new(size: usize) -> Self {
+        let byte_len = E::byte_len() * size;
+        let file = Arc::new(RwLock::new(tempfile().expect("couldn't create temp file")));
+        file.write()
+            .unwrap()
+            .set_len(byte_len as u64)
+            .unwrap_or_else(|_| panic!("couldn't set len of {}", byte_len));
+
+        DiskStore {
+            len: 0,
+            _e: Default::default(),
+            file,
+            store_size: byte_len,
+        }
+    }
+
+    fn new_from_slice(size: usize, data: &[u8]) -> Self {
+        assert_eq!(data.len() % E::byte_len(), 0);
+
+        let mut res = Self::new(size);
+
+        let end = data.len();
+        res.store_copy_from_slice(0, end, data);
+        res.len = data.len() / E::byte_len();
+
+        res
+    }
+
+    fn write_at(&mut self, el: E, i: usize) {
+        let b = E::byte_len();
+        self.store_copy_from_slice(i * b, (i + 1) * b, el.as_ref());
+        self.len = std::cmp::max(self.len, i + 1);
+    }
+
+    fn copy_from_slice(&mut self, buf: &[u8], start: usize) {
+        let b = E::byte_len();
+        assert_eq!(buf.len() % b, 0);
+        self.store_copy_from_slice(start * b, start * b + buf.len(), buf);
+        self.len = std::cmp::max(self.len, start + buf.len() / b);
+    }
+
+    fn read_at(&self, i: usize) -> E {
+        let b = E::byte_len();
+        let start = i * b;
+        let end = (i + 1) * b;
+        let len = self.len * b;
+        assert!(start < len, "start out of range {} >= {}", start, len);
+        assert!(end <= len, "end out of range {} > {}", end, len);
+
+        E::from_slice(&self.store_read_range(start, end))
+    }
+
+    fn read_into(&self, i: usize, buf: &mut [u8]) {
+        let b = E::byte_len();
+        let start = i * b;
+        let end = (i + 1) * b;
+        let len = self.len * b;
+        assert!(start < len, "start out of range {} >= {}", start, len);
+        assert!(end <= len, "end out of range {} > {}", end, len);
+
+        self.store_read_into(start, end, buf);
+    }
+
+    fn read_range(&self, r: ops::Range<usize>) -> Vec<E> {
+        let b = E::byte_len();
+        let start = r.start * b;
+        let end = r.end * b;
+        let len = self.len * b;
+        assert!(start < len, "start out of range {} >= {}", start, len);
+        assert!(end <= len, "end out of range {} > {}", end, len);
+
+        self.store_read_range(start, end)
+            .chunks(b)
+            .map(E::from_slice)
+            .collect()
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push(&mut self, el: E) {
+        let l = self.len;
+        assert!(
+            (l + 1) * E::byte_len() <= self.store_size(),
+            format!(
+                "not enough space, l: {}, E size {}, store len {}",
+                l,
+                E::byte_len(),
+                self.store_size()
+            )
+        );
+
+        self.write_at(el, l);
+    }
+
+    fn try_offload(&self) -> bool {
+        false
+    }
+
+    fn sync(&self) {
+        self.file.write().unwrap().sync_all().expect("failed to sync file");
+        // FIXME: Should we use `flush` instead?
+    }
+}
+
+impl<E: Element> DiskStore<E> {
+    #[allow(unsafe_code)]
+    // FIXME: Return errors on failure instead of panicking
+    //  (see https://github.com/filecoin-project/merkle_light/issues/19).
+    pub fn new_with_path(size: usize, path: &Path) -> Self {
+        let byte_len = E::byte_len() * size;
+        let file = Arc::new(RwLock::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&path)
+                .expect("cannot create file"),
+        ));
+        file.write().unwrap().set_len(byte_len as u64).unwrap();
+
+        DiskStore {
+            len: 0,
+            _e: Default::default(),
+            file,
+            store_size: byte_len,
+        }
+    }
+
+    pub fn store_size(&self) -> usize {
+        self.store_size
+    }
+
+    pub fn store_read_range(&self, start: usize, end: usize) -> Vec<u8> {
+        let read_len = end - start;
+        let mut read_data = vec![0; read_len];
+
+        self.file
+            .write()
+            .unwrap()
+            .seek(SeekFrom::Start(start as u64))
+            .expect("failed to seek file");
+        self.file
+            .write()
+            .unwrap()
+            .read_exact(&mut read_data)
+            .expect(&format!("failed to read {} bytes from file at offset {}", read_len, start));
+        read_data.clone()
+        // FIXME: Remove clone.
+    }
+
+    pub fn store_read_into(&self, start: usize, end: usize, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.store_read_range(start, end));
+    }
+
+    // FIXME: Check length with `end`, we should not allow to write past the 
+    // original file size (`self.store_size`).
+    pub fn store_copy_from_slice(&self, start: usize, _end: usize, slice: &[u8]) {
+        self.file
+            .write()
+            .unwrap()
+            .seek(SeekFrom::Start(start as u64))
+            .expect("failed to seek file");
+
+        self.file
+            .write()
+            .unwrap()
+            .write(slice)
+            .expect("failed to write file");
+    }
+}
+
+// FIXME: Fake `Clone` implementation to accomodate the artificial call in
+//  `from_data_with_store`, we won't actually duplicate the mmap memory,
+//  just recreate the same object (as the original will be dropped).
+impl<E: Element> Clone for DiskStore<E> {
+    fn clone(&self) -> DiskStore<E> {
+        unimplemented!("We can't clone a store with an already associated file");
+    }
+}
+
 impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     /// Creates new merkle from a sequence of hashes.
     pub fn new<I: IntoIterator<Item = T>>(data: I) -> MerkleTree<T, A, K> {
@@ -617,6 +843,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             a.reset();
             leaves.push(a.leaf(item));
         }
+        leaves.sync();
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
@@ -704,7 +931,9 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
                     let chunk_nodes = {
                         // Read everything taking the lock once.
-                        let read_store = read_store_lock.read().unwrap();
+                        let read_store = read_store_lock.write().unwrap();
+                        // FIXME: Reading in the DiskStore is modyfing state at the moment (offset)
+                        //  so it can't happen in parallel with other reads/writes.
                         read_store.read_range(chunk_index..chunk_index + chunk_size)
                     };
 
@@ -738,6 +967,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             level_node_index += width;
             level += 1;
             width >>= 1;
+            write_store_lock.write().unwrap().sync();
         }
 
         assert_eq!(height, level + 1);
@@ -1020,6 +1250,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromIterator<T> for MerkleTree<T,
             a.reset();
             leaves.push(a.leaf(item));
         }
+        leaves.sync();
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }

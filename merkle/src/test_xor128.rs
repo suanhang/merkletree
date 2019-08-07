@@ -2,7 +2,9 @@
 
 use hash::*;
 use merkle::{log2_pow2, next_pow2};
-use merkle::{DiskMmapStore, Element, MerkleTree, MmapStore, VecStore, SMALL_TREE_BUILD};
+use merkle::{
+    DiskMmapStore, DiskStore, Element, MerkleTree, MmapStore, VecStore, SMALL_TREE_BUILD,
+};
 use std::fmt;
 use std::hash::Hasher;
 use std::iter::FromIterator;
@@ -393,5 +395,14 @@ fn test_large_tree() {
                 a.hash()
             }));
         assert_eq!(mt_disk_mmap.len(), 2 * count - 1);
+
+        let mt_disk: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+            MerkleTree::from_iter((0..count).map(|x| {
+                a.reset();
+                x.hash(&mut a);
+                i.hash(&mut a);
+                a.hash()
+            }));
+        assert_eq!(mt_disk.len(), 2 * count - 1);
     }
 }
