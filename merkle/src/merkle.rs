@@ -632,8 +632,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
 
         let mut res = Self::new(size);
 
-        let end = data.len();
-        res.store_copy_from_slice(0, end, data);
+        res.store_copy_from_slice(0, data);
         res.len = data.len() / E::byte_len();
 
         res
@@ -641,14 +640,14 @@ impl<E: Element> Store<E> for DiskStore<E> {
 
     fn write_at(&mut self, el: E, i: usize) {
         let b = E::byte_len();
-        self.store_copy_from_slice(i * b, (i + 1) * b, el.as_ref());
+        self.store_copy_from_slice(i * b, el.as_ref());
         self.len = std::cmp::max(self.len, i + 1);
     }
 
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) {
         let b = E::byte_len();
         assert_eq!(buf.len() % b, 0);
-        self.store_copy_from_slice(start * b, start * b + buf.len(), buf);
+        self.store_copy_from_slice(start * b, buf);
         self.len = std::cmp::max(self.len, start + buf.len() / b);
     }
 
@@ -769,9 +768,8 @@ impl<E: Element> DiskStore<E> {
         buf.copy_from_slice(&self.store_read_range(start, end));
     }
 
-    // FIXME: Check length with `end`, we should not allow to write past the
-    // original file size (`self.store_size`).
-    pub fn store_copy_from_slice(&mut self, start: usize, _end: usize, slice: &[u8]) {
+    pub fn store_copy_from_slice(&mut self, start: usize, slice: &[u8]) {
+        assert!(start + slice.len() <= self.store_size);
         self.file
             .write_at(start as u64, slice)
             .expect("failed to write file");
