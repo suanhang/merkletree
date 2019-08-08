@@ -905,7 +905,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             // pair of nodes to write them to the next level in concurrent threads.
             // Process `chunk_size` nodes in each thread at a time to reduce contention, optimized
             // for big sector sizes (small ones will just have one thread doing all the work).
-            let chunk_size = 1024;
+            let chunk_size = 65536;
             debug_assert_eq!(chunk_size % 2, 0);
             Vec::from_iter((read_start..read_start + width).step_by(chunk_size))
                 .par_iter()
