@@ -753,7 +753,7 @@ impl<E: Element> DiskStore<E> {
         assert_eq!(
             self.file
                 .read_at(start as u64, &mut read_data)
-                .expect(&format!(
+                .unwrap_or_else(|_| panic!(
                     "failed to read {} bytes from file at offset {}",
                     read_len, start
                 )),
