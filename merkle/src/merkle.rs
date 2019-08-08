@@ -715,7 +715,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     fn sync(&self) {
-        // self.file.sync_data().expect("failed to sync file");
+        // self.file.sync_all().expect("failed to sync file");
         // FIXME: Should we use `flush` instead?
     }
 }
@@ -1206,6 +1206,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromParallelIterator<T> for Merkl
         for v in vs.into_iter() {
             leaves.push(v);
         }
+        leaves.sync();
 
         assert!(leafs > 1);
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
@@ -1225,13 +1226,26 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromIterator<T> for MerkleTree<T,
         let mut leaves = K::new(pow);
         let top_half = K::new(pow);
 
+        let block_size = 1024;
+        let mut buf = Vec::with_capacity(block_size * T::byte_len());
+
         // leafs
         let mut a = A::default();
         for item in iter {
             a.reset();
-            leaves.push(a.leaf(item));
+            let el = a.leaf(item.clone());
+            // leaves.push(el);
+
+            buf.extend(el.as_ref());
+            if buf.len() >= 1024 * T::byte_len() {
+                leaves.copy_from_slice(&buf, leaves.len());
+                leaves.sync();
+                buf.clear();
+            }
         }
+        leaves.copy_from_slice(&buf, leaves.len());
         leaves.sync();
+        buf.clear();
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
