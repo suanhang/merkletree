@@ -1,11 +1,11 @@
 use hash::{Algorithm, Hashable};
 use memmap::MmapMut;
 use memmap::MmapOptions;
+use positioned_io::{ReadAt, WriteAt};
 use proof::Proof;
 use rayon::prelude::*;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::{self, Index};
@@ -122,8 +122,7 @@ pub trait Store<E: Element>:
     // unnecessary flush calls at the cost of added code complexity.
     // FIXME: Check all the places where we write in the store to evaluate
     //  where to sync.
-    fn sync(&self) {
-    }
+    fn sync(&self) {}
 }
 
 #[derive(Debug, Clone)]
@@ -594,9 +593,7 @@ impl<E: Element> Clone for DiskMmapStore<E> {
 pub struct DiskStore<E: Element> {
     len: usize,
     _e: PhantomData<E>,
-    file: Arc<RwLock<File>>,
-    // FIXME: Using `Arc/``RwLock` this to allow reads without mutable
-    //  reference (because seeking changes the state of the file).
+    file: File,
 
     // We cache the `store.len()` call to avoid accessing the store when
     // it's offloaded. Not to be confused with `len`, this saves the total
@@ -618,10 +615,8 @@ impl<E: Element> Store<E> for DiskStore<E> {
     #[allow(unsafe_code)]
     fn new(size: usize) -> Self {
         let byte_len = E::byte_len() * size;
-        let file = Arc::new(RwLock::new(tempfile().expect("couldn't create temp file")));
-        file.write()
-            .unwrap()
-            .set_len(byte_len as u64)
+        let file = tempfile().expect("couldn't create temp file");
+        file.set_len(byte_len as u64)
             .unwrap_or_else(|_| panic!("couldn't set len of {}", byte_len));
 
         DiskStore {
@@ -721,7 +716,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     fn sync(&self) {
-        self.file.write().unwrap().sync_all().expect("failed to sync file");
+        self.file.sync_all().expect("failed to sync file");
         // FIXME: Should we use `flush` instead?
     }
 }
@@ -732,15 +727,13 @@ impl<E: Element> DiskStore<E> {
     //  (see https://github.com/filecoin-project/merkle_light/issues/19).
     pub fn new_with_path(size: usize, path: &Path) -> Self {
         let byte_len = E::byte_len() * size;
-        let file = Arc::new(RwLock::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&path)
-                .expect("cannot create file"),
-        ));
-        file.write().unwrap().set_len(byte_len as u64).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .expect("cannot create file");
+        file.set_len(byte_len as u64).unwrap();
 
         DiskStore {
             len: 0,
@@ -758,16 +751,16 @@ impl<E: Element> DiskStore<E> {
         let read_len = end - start;
         let mut read_data = vec![0; read_len];
 
-        self.file
-            .write()
-            .unwrap()
-            .seek(SeekFrom::Start(start as u64))
-            .expect("failed to seek file");
-        self.file
-            .write()
-            .unwrap()
-            .read_exact(&mut read_data)
-            .expect(&format!("failed to read {} bytes from file at offset {}", read_len, start));
+        assert_eq!(
+            self.file
+                .read_at(start as u64, &mut read_data)
+                .expect(&format!(
+                    "failed to read {} bytes from file at offset {}",
+                    read_len, start
+                )),
+            read_len
+        );
+
         read_data.clone()
         // FIXME: Remove clone.
     }
@@ -776,19 +769,11 @@ impl<E: Element> DiskStore<E> {
         buf.copy_from_slice(&self.store_read_range(start, end));
     }
 
-    // FIXME: Check length with `end`, we should not allow to write past the 
+    // FIXME: Check length with `end`, we should not allow to write past the
     // original file size (`self.store_size`).
-    pub fn store_copy_from_slice(&self, start: usize, _end: usize, slice: &[u8]) {
+    pub fn store_copy_from_slice(&mut self, start: usize, _end: usize, slice: &[u8]) {
         self.file
-            .write()
-            .unwrap()
-            .seek(SeekFrom::Start(start as u64))
-            .expect("failed to seek file");
-
-        self.file
-            .write()
-            .unwrap()
-            .write(slice)
+            .write_at(start as u64, slice)
             .expect("failed to write file");
     }
 }
@@ -931,9 +916,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
                     let chunk_nodes = {
                         // Read everything taking the lock once.
-                        let read_store = read_store_lock.write().unwrap();
-                        // FIXME: Reading in the DiskStore is modyfing state at the moment (offset)
-                        //  so it can't happen in parallel with other reads/writes.
+                        let read_store = read_store_lock.read().unwrap();
                         read_store.read_range(chunk_index..chunk_index + chunk_size)
                     };
 
