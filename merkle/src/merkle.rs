@@ -715,7 +715,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     fn sync(&self) {
-        self.file.sync_all().expect("failed to sync file");
+        // self.file.sync_data().expect("failed to sync file");
         // FIXME: Should we use `flush` instead?
     }
 }
