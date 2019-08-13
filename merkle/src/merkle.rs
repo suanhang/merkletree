@@ -820,13 +820,26 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
         let pow = next_pow2(leafs);
 
+        let block_size = 1024;
+        let mut buf = Vec::with_capacity(block_size * T::byte_len());
+
         // leafs
         let mut a = A::default();
         for item in iter {
             a.reset();
-            leaves.push(a.leaf(item));
+            let el = a.leaf(item.clone());
+            // leaves.push(el);
+
+            buf.extend(el.as_ref());
+            if buf.len() >= 1024 * T::byte_len() {
+                leaves.copy_from_slice(&buf, leaves.len());
+                leaves.sync();
+                buf.clear();
+            }
         }
+        leaves.copy_from_slice(&buf, leaves.len());
         leaves.sync();
+        buf.clear();
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
