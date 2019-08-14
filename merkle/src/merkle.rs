@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::{self, Index};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tempfile::tempfile;
 
@@ -65,7 +65,7 @@ where
     height: usize,
 
     // Cache with the `root` of the tree built from `data`. This allows to
-    // not access the `Store` when offloaded (`DiskMmapStore` case).
+    // not access the `Store` (e.g., access to disks in `DiskStore`).
     root: T,
 
     _a: PhantomData<A>,
@@ -109,14 +109,6 @@ pub trait Store<E: Element>:
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;
     fn push(&mut self, el: E);
-
-    // Signal to offload the `data` from memory if possible (`DiskMmapStore`
-    // case). When the `data` is read/written again it should be automatically
-    // reloaded. This function is only a hint with an optional implementation
-    // (its mechanism should be transparent to the user who doesn't need to
-    // manually reload).
-    // Returns `true` if it was able to comply.
-    fn try_offload(&self) -> bool;
 
     // Sync contents to disk (if it exists). This function is used to avoid
     // unnecessary flush calls at the cost of added code complexity.
@@ -201,10 +193,6 @@ impl<E: Element> Store<E> for VecStore<E> {
 
     fn push(&mut self, el: E) {
         self.0.push(el);
-    }
-
-    fn try_offload(&self) -> bool {
-        false
     }
 }
 
@@ -316,10 +304,6 @@ impl<E: Element> Store<E> for MmapStore<E> {
 
         self.write_at(el, l);
     }
-
-    fn try_offload(&self) -> bool {
-        false
-    }
 }
 
 impl<E: Element> Clone for MmapStore<E> {
@@ -331,262 +315,9 @@ impl<E: Element> Clone for MmapStore<E> {
     }
 }
 
-/// File-mapping version of `MmapStore` with the added `new_with_path` method
-/// that allows to set its path (otherwise a temporary file is used which is
-/// cleaned up after we drop this structure).
-#[derive(Debug)]
-pub struct DiskMmapStore<E: Element> {
-    // Implementing the `store` with `Arc`/`RwLock` to avoid adding lifetimes
-    // parameters to the struct (which might have larger repercussions in the
-    // definitions of the `MerkleTree` and its consumers. Also used for its
-    // coordination mechanisms, but it's not clearly defined if `MerkleTree`
-    // (and `Store`) should be thread-safe (so they might be removed later).
-    store: Arc<RwLock<Option<MmapMut>>>,
-
-    len: usize,
-    _e: PhantomData<E>,
-    file: File,
-    // We need to save the `File` in case we're creating a `tempfile()`
-    // otherwise it will get cleaned after we return from `new()`.
-
-    // We cache the `store.len()` call to avoid accessing the store when
-    // it's offloaded. Not to be confused with `len`, this saves the total
-    // size of the `store` and the other one keeps track of used `E` slots
-    // in the `DiskMmapStore`.
-    store_size: usize,
-
-    // We save the arguments of `new_with_path` to reconstruct it and reload
-    // the `MmapMut` after offload has been called.
-    path: PathBuf,
-    size: Option<usize>,
-}
-
-impl<E: Element> ops::Deref for DiskMmapStore<E> {
-    type Target = [E];
-
-    fn deref(&self) -> &Self::Target {
-        unimplemented!()
-    }
-}
-
-impl<E: Element> Store<E> for DiskMmapStore<E> {
-    #[allow(unsafe_code)]
-    fn new(size: usize) -> Self {
-        let byte_len = E::byte_len() * size;
-        let file: File = tempfile().expect("couldn't create temp file");
-        file.set_len(byte_len as u64)
-            .unwrap_or_else(|_| panic!("couldn't set len of {}", byte_len));
-
-        let mmap = unsafe { MmapMut::map_mut(&file).expect("couldn't create map_mut") };
-        let mmap_size = mmap.len();
-        DiskMmapStore {
-            store: Arc::new(RwLock::new(Some(mmap))),
-            len: 0,
-            _e: Default::default(),
-            file,
-            store_size: mmap_size,
-            path: PathBuf::new(),
-            size: None,
-        }
-    }
-
-    fn new_from_slice(size: usize, data: &[u8]) -> Self {
-        assert_eq!(data.len() % E::byte_len(), 0);
-
-        let mut res = Self::new(size);
-
-        let end = data.len();
-        res.store_copy_from_slice(0, end, data);
-        res.len = data.len() / E::byte_len();
-
-        res
-    }
-
-    fn write_at(&mut self, el: E, i: usize) {
-        let b = E::byte_len();
-        self.store_copy_from_slice(i * b, (i + 1) * b, el.as_ref());
-        self.len = std::cmp::max(self.len, i + 1);
-    }
-
-    fn copy_from_slice(&mut self, buf: &[u8], start: usize) {
-        let b = E::byte_len();
-        assert_eq!(buf.len() % b, 0);
-        self.store_copy_from_slice(start * b, start * b + buf.len(), buf);
-        self.len = std::cmp::max(self.len, start + buf.len() / b);
-    }
-
-    fn read_at(&self, i: usize) -> E {
-        let b = E::byte_len();
-        let start = i * b;
-        let end = (i + 1) * b;
-        let len = self.len * b;
-        assert!(start < len, "start out of range {} >= {}", start, len);
-        assert!(end <= len, "end out of range {} > {}", end, len);
-
-        E::from_slice(&self.store_read_range(start, end))
-    }
-
-    fn read_into(&self, i: usize, buf: &mut [u8]) {
-        let b = E::byte_len();
-        let start = i * b;
-        let end = (i + 1) * b;
-        let len = self.len * b;
-        assert!(start < len, "start out of range {} >= {}", start, len);
-        assert!(end <= len, "end out of range {} > {}", end, len);
-
-        self.store_read_into(start, end, buf);
-    }
-
-    fn read_range(&self, r: ops::Range<usize>) -> Vec<E> {
-        let b = E::byte_len();
-        let start = r.start * b;
-        let end = r.end * b;
-        let len = self.len * b;
-        assert!(start < len, "start out of range {} >= {}", start, len);
-        assert!(end <= len, "end out of range {} > {}", end, len);
-
-        self.store_read_range(start, end)
-            .chunks(b)
-            .map(E::from_slice)
-            .collect()
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn push(&mut self, el: E) {
-        let l = self.len;
-        assert!(
-            (l + 1) * E::byte_len() <= self.store_size(),
-            format!(
-                "not enough space, l: {}, E size {}, store len {}",
-                l,
-                E::byte_len(),
-                self.store_size()
-            )
-        );
-
-        self.write_at(el, l);
-    }
-
-    // Offload the `store` in the case it was constructed with `new_with_path`.
-    // Temporary files with no path (created from `new`) can't be offloaded.
-    fn try_offload(&self) -> bool {
-        if self.path.as_os_str().is_empty() {
-            // Temporary file.
-            return false;
-        }
-
-        *self.store.write().unwrap() = None;
-
-        true
-    }
-}
-
-impl<E: Element> DiskMmapStore<E> {
-    #[allow(unsafe_code)]
-    // FIXME: Return errors on failure instead of panicking
-    //  (see https://github.com/filecoin-project/merkle_light/issues/19).
-    pub fn new_with_path(size: usize, path: &Path) -> Self {
-        let byte_len = E::byte_len() * size;
-        let file: File = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .expect("cannot create file");
-        file.set_len(byte_len as u64).unwrap();
-
-        let mmap = unsafe { MmapMut::map_mut(&file).expect("couldn't create map_mut") };
-        let mmap_size = mmap.len();
-        DiskMmapStore {
-            store: Arc::new(RwLock::new(Some(mmap))),
-            len: 0,
-            _e: Default::default(),
-            file,
-            store_size: mmap_size,
-            path: path.to_path_buf(),
-            size: Some(size),
-        }
-    }
-
-    pub fn store_size(&self) -> usize {
-        self.store_size
-    }
-
-    pub fn store_read_range(&self, start: usize, end: usize) -> Vec<u8> {
-        self.reload_store();
-        // FIXME: Not actually thread safe, the `store` could have been offloaded
-        //  after this call (but we're not striving for thread-safety at the moment).
-
-        match *self.store.read().unwrap() {
-            Some(ref mmap) => mmap[start..end].to_vec(),
-            None => panic!("The store has not been reloaded"),
-        }
-    }
-
-    pub fn store_read_into(&self, start: usize, end: usize, buf: &mut [u8]) {
-        self.reload_store();
-        // FIXME: Not actually thread safe, the `store` could have been offloaded
-        //  after this call (but we're not striving for thread-safety at the moment).
-
-        match *self.store.read().unwrap() {
-            Some(ref mmap) => buf.copy_from_slice(&mmap[start..end]),
-            None => panic!("The store has not been reloaded"),
-        }
-    }
-
-    pub fn store_copy_from_slice(&self, start: usize, end: usize, slice: &[u8]) {
-        self.reload_store();
-        match *self.store.write().unwrap() {
-            Some(ref mut mmap) => mmap[start..end].copy_from_slice(slice),
-            None => panic!("The store has not been reloaded"),
-        }
-    }
-
-    // Checks if the `store` is loaded and reloads it if necessary.
-    // FIXME: Check how to compact this logic.
-    fn reload_store(&self) {
-        let need_to_reload_store = self.store.read().unwrap().is_none();
-
-        if need_to_reload_store {
-            let new_store: DiskMmapStore<E> = DiskMmapStore::new_with_path(
-                self.size.expect("couldn't find size"),
-                Path::new(&self.path),
-            );
-            //            self.store = Arc::new(RwLock::new();
-            // FIXME: Extract part of the `MmapMut` creation logic to avoid
-            //  recreating the entire `DiskMmapStore`.
-
-            let mut store = self.store.write().unwrap();
-            let new_store = Arc::try_unwrap(new_store.store)
-                .unwrap()
-                .into_inner()
-                .unwrap();
-
-            std::mem::replace(&mut *store, new_store);
-        }
-    }
-}
-
-// FIXME: Fake `Clone` implementation to accomodate the artificial call in
-//  `from_data_with_store`, we won't actually duplicate the mmap memory,
-//  just recreate the same object (as the original will be dropped).
-impl<E: Element> Clone for DiskMmapStore<E> {
-    fn clone(&self) -> DiskMmapStore<E> {
-        unimplemented!("We can't clone a mmap with an already associated file");
-    }
-}
-
 /// Disk-only store use to reduce memory to the minimum at the cost of build
-/// time performance. Copied from `DiskMmapStore`, most of its I/O logic is
-/// in the `store_copy_from_slice` and `store_read_range` functions.
-// FIXME: Define a file API (integrate it with `DiskMmapStore`), using temp files for now.
+/// time performance. Most of its I/O logic is in the `store_copy_from_slice`
+/// and `store_read_range` functions.
 // FIXME: Evaluate if a buffered writer is needed, we already always write
 //  blocks of `chunk_size` (1024) at a time.
 #[derive(Debug)]
@@ -710,10 +441,6 @@ impl<E: Element> Store<E> for DiskStore<E> {
         self.write_at(el, l);
     }
 
-    fn try_offload(&self) -> bool {
-        false
-    }
-
     fn sync(&self) {
         // self.file.sync_all().expect("failed to sync file");
         // FIXME: Should we use `flush` instead?
@@ -802,8 +529,8 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     }
 
     /// Creates new merkle from an already allocated `Store` (used with
-    /// `DiskMmapStore::new_with_path` to set its path before instantiating
-    /// the MT, which would otherwise just call `DiskMmapStore::new`).
+    /// `DiskStore::new_with_path` to set its path before instantiating
+    /// the MT, which would otherwise just call `DiskStore::new`).
     // FIXME: Taken from `MerkleTree::from_iter` to avoid adding more complexity,
     //  it should receive a `parallel` flag to decide what to do.
     // FIXME: We're repeating too much code here, `from_iter` (and
@@ -842,11 +569,6 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         buf.clear();
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
-    }
-
-    #[inline]
-    pub fn try_offload_store(&self) -> bool {
-        self.leaves.try_offload() && self.top_half.try_offload()
     }
 
     #[inline]
