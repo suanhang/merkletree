@@ -25,6 +25,9 @@ pub const SMALL_TREE_BUILD: usize = 1024;
 // avoid single `push`es which degrades performance for `DiskStore`.
 pub const BUILD_LEAVES_BLOCK_SIZE: usize = 1024;
 
+// Number of nodes to process in parallel during the `build` stage.
+pub const BUILD_CHUNK_NODES: usize = 64 * 1024;
+
 /// Merkle Tree.
 ///
 /// All leafs and nodes are stored in a linear array (vec).
@@ -616,14 +619,14 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             // Allocate `width` indexes during operation (which is a negligible memory bloat
             // compared to the 32-bytes size of the nodes stored in the `Store`s) and hash each
             // pair of nodes to write them to the next level in concurrent threads.
-            // Process `chunk_size` nodes in each thread at a time to reduce contention, optimized
-            // for big sector sizes (small ones will just have one thread doing all the work).
-            let chunk_size = 65536;
-            debug_assert_eq!(chunk_size % 2, 0);
-            Vec::from_iter((read_start..read_start + width).step_by(chunk_size))
+            // Process `BUILD_CHUNK_NODES` nodes in each thread at a time to reduce contention,
+            // optimized for big sector sizes (small ones will just have one thread doing all
+            // the work).
+            debug_assert_eq!(BUILD_CHUNK_NODES % 2, 0);
+            Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
                 .par_iter()
                 .for_each(|&chunk_index| {
-                    let chunk_size = std::cmp::min(chunk_size, read_start + width - chunk_index);
+                    let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                     let chunk_nodes = {
                         // Read everything taking the lock once.
