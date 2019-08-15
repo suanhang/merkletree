@@ -2,9 +2,7 @@
 
 use hash::*;
 use merkle::{log2_pow2, next_pow2};
-use merkle::{
-    DiskStore, Element, MerkleTree, MmapStore, VecStore, SMALL_TREE_BUILD,
-};
+use merkle::{DiskStore, Element, MerkleTree, MmapStore, VecStore, SMALL_TREE_BUILD};
 use std::fmt;
 use std::hash::Hasher;
 use std::iter::FromIterator;
@@ -321,10 +319,7 @@ fn test_simple_tree() {
 
             let disk_leaves: DiskStore<[u8; 16]> = DiskStore::new_with_path(
                 next_pow2(leafs.len()),
-                &temp_dir
-                    .path()
-                    .to_owned()
-                    .join("test-xor-128-disk-leaves"),
+                &temp_dir.path().to_owned().join("test-xor-128-disk-leaves"),
             );
 
             let disk_top_half: DiskStore<[u8; 16]> = DiskStore::new_with_path(

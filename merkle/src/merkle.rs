@@ -626,7 +626,8 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
                 .par_iter()
                 .for_each(|&chunk_index| {
-                    let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
+                    let chunk_size =
+                        std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                     let chunk_nodes = {
                         // Read everything taking the lock once.
@@ -988,23 +989,26 @@ pub fn log2_pow2(n: usize) -> usize {
     n.trailing_zeros() as usize
 }
 
-fn populate_leaves<T: Element, A: Algorithm<T>, K: Store<T>, I: IntoIterator<Item = T>>(leaves: &mut K, iter: <I as std::iter::IntoIterator>::IntoIter) {
-        let mut buf = Vec::with_capacity(BUILD_LEAVES_BLOCK_SIZE * T::byte_len());
+fn populate_leaves<T: Element, A: Algorithm<T>, K: Store<T>, I: IntoIterator<Item = T>>(
+    leaves: &mut K,
+    iter: <I as std::iter::IntoIterator>::IntoIter,
+) {
+    let mut buf = Vec::with_capacity(BUILD_LEAVES_BLOCK_SIZE * T::byte_len());
 
-        let mut a = A::default();
-        for item in iter {
-            a.reset();
-            buf.extend(a.leaf(item).as_ref());
-            if buf.len() >= BUILD_LEAVES_BLOCK_SIZE * T::byte_len() {
-                let leaves_len = leaves.len();
-                // FIXME: Integrate into `len()` call into `copy_from_slice`
-                // once we update to `stable` 1.36.
-                leaves.copy_from_slice(&buf, leaves_len);
-                buf.clear();
-            }
+    let mut a = A::default();
+    for item in iter {
+        a.reset();
+        buf.extend(a.leaf(item).as_ref());
+        if buf.len() >= BUILD_LEAVES_BLOCK_SIZE * T::byte_len() {
+            let leaves_len = leaves.len();
+            // FIXME: Integrate into `len()` call into `copy_from_slice`
+            // once we update to `stable` 1.36.
+            leaves.copy_from_slice(&buf, leaves_len);
+            buf.clear();
         }
-        let leaves_len = leaves.len();
-        leaves.copy_from_slice(&buf, leaves_len);
+    }
+    let leaves_len = leaves.len();
+    leaves.copy_from_slice(&buf, leaves_len);
 
-        leaves.sync();
+    leaves.sync();
 }
