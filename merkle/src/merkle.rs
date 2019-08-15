@@ -1000,11 +1000,15 @@ fn populate_leaves<T: Element, A: Algorithm<T>, K: Store<T>, I: IntoIterator<Ite
             a.reset();
             buf.extend(a.leaf(item).as_ref());
             if buf.len() >= BUILD_LEAVES_BLOCK_SIZE * T::byte_len() {
-                leaves.copy_from_slice(&buf, leaves.len());
+                let leaves_len = leaves.len();
+                // FIXME: Integrate into `len()` call into `copy_from_slice`
+                // once we update to `stable` 1.36.
+                leaves.copy_from_slice(&buf, leaves_len);
                 buf.clear();
             }
         }
-        leaves.copy_from_slice(&buf, leaves.len());
+        let leaves_len = leaves.len();
+        leaves.copy_from_slice(&buf, leaves_len);
 
         leaves.sync();
 }
