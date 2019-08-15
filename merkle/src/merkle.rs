@@ -21,6 +21,10 @@ use tempfile::tempfile;
 /// as less as possible with multiple threads competing to get the write lock.
 pub const SMALL_TREE_BUILD: usize = 1024;
 
+// Number of batched nodes processed and stored together in `populate_leaves` to
+// avoid single `push`es which degrades performance for `DiskStore`.
+pub const BUILD_LEAVES_BLOCK_SIZE: usize = 1024;
+
 /// Merkle Tree.
 ///
 /// All leafs and nodes are stored in a linear array (vec).
@@ -547,26 +551,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
 
         let pow = next_pow2(leafs);
 
-        let block_size = 1024;
-        let mut buf = Vec::with_capacity(block_size * T::byte_len());
-
-        // leafs
-        let mut a = A::default();
-        for item in iter {
-            a.reset();
-            let el = a.leaf(item.clone());
-            // leaves.push(el);
-
-            buf.extend(el.as_ref());
-            if buf.len() >= 1024 * T::byte_len() {
-                leaves.copy_from_slice(&buf, leaves.len());
-                leaves.sync();
-                buf.clear();
-            }
-        }
-        leaves.copy_from_slice(&buf, leaves.len());
-        leaves.sync();
-        buf.clear();
+        populate_leaves::<T, A, K, I>(&mut leaves, iter);
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
@@ -942,6 +927,8 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromParallelIterator<T> for Merkl
             leaves.push(v);
         }
         leaves.sync();
+        // FIXME: Use a similar construction to `populate_leaves`
+        // for parallel threads.
 
         assert!(leafs > 1);
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
@@ -961,26 +948,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromIterator<T> for MerkleTree<T,
         let mut leaves = K::new(pow);
         let top_half = K::new(pow);
 
-        let block_size = 1024;
-        let mut buf = Vec::with_capacity(block_size * T::byte_len());
-
-        // leafs
-        let mut a = A::default();
-        for item in iter {
-            a.reset();
-            let el = a.leaf(item.clone());
-            // leaves.push(el);
-
-            buf.extend(el.as_ref());
-            if buf.len() >= 1024 * T::byte_len() {
-                leaves.copy_from_slice(&buf, leaves.len());
-                leaves.sync();
-                buf.clear();
-            }
-        }
-        leaves.copy_from_slice(&buf, leaves.len());
-        leaves.sync();
-        buf.clear();
+        populate_leaves::<T, A, K, I>(&mut leaves, iter);
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
@@ -1022,4 +990,21 @@ pub fn next_pow2(mut n: usize) -> usize {
 /// find power of 2 of a number which is power of 2
 pub fn log2_pow2(n: usize) -> usize {
     n.trailing_zeros() as usize
+}
+
+fn populate_leaves<T: Element, A: Algorithm<T>, K: Store<T>, I: IntoIterator<Item = T>>(leaves: &mut K, iter: <I as std::iter::IntoIterator>::IntoIter) {
+        let mut buf = Vec::with_capacity(BUILD_LEAVES_BLOCK_SIZE * T::byte_len());
+
+        let mut a = A::default();
+        for item in iter {
+            a.reset();
+            buf.extend(a.leaf(item).as_ref());
+            if buf.len() >= BUILD_LEAVES_BLOCK_SIZE * T::byte_len() {
+                leaves.copy_from_slice(&buf, leaves.len());
+                buf.clear();
+            }
+        }
+        leaves.copy_from_slice(&buf, leaves.len());
+
+        leaves.sync();
 }
