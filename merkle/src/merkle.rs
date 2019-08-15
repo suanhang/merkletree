@@ -116,8 +116,6 @@ pub trait Store<E: Element>:
 
     // Sync contents to disk (if it exists). This function is used to avoid
     // unnecessary flush calls at the cost of added code complexity.
-    // FIXME: Check all the places where we write in the store to evaluate
-    //  where to sync.
     fn sync(&self) {}
 }
 
@@ -322,20 +320,16 @@ impl<E: Element> Clone for MmapStore<E> {
 /// Disk-only store use to reduce memory to the minimum at the cost of build
 /// time performance. Most of its I/O logic is in the `store_copy_from_slice`
 /// and `store_read_range` functions.
-// FIXME: Evaluate if a buffered writer is needed, we already always write
-//  blocks of `chunk_size` (1024) at a time.
 #[derive(Debug)]
 pub struct DiskStore<E: Element> {
     len: usize,
     _e: PhantomData<E>,
     file: File,
 
-    // We cache the `store.len()` call to avoid accessing the store when
-    // it's offloaded. Not to be confused with `len`, this saves the total
-    // size of the `store` and the other one keeps track of used `E` slots
-    // in the `DiskStore`.
+    // We cache the `store.len()` call to avoid accessing disk unnecessarily.
+    // Not to be confused with `len`, this saves the total size of the `store`
+    // in bytes and the other one keeps track of used `E` slots in the `DiskStore`.
     store_size: usize,
-    // FIXME: Probably not needed here.
 }
 
 impl<E: Element> ops::Deref for DiskStore<E> {
@@ -446,8 +440,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     fn sync(&self) {
-        // self.file.sync_all().expect("failed to sync file");
-        // FIXME: Should we use `flush` instead?
+        self.file.sync_all().expect("failed to sync file");
     }
 }
 
