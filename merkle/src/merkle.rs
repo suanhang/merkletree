@@ -487,8 +487,7 @@ impl<E: Element> DiskStore<E> {
             read_len
         );
 
-        read_data.clone()
-        // FIXME: Remove clone.
+        read_data
     }
 
     pub fn store_read_into(&self, start: usize, end: usize, buf: &mut [u8]) {
