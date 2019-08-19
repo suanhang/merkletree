@@ -21,12 +21,15 @@ use tempfile::tempfile;
 /// as less as possible with multiple threads competing to get the write lock.
 pub const SMALL_TREE_BUILD: usize = 1024;
 
+// Number of nodes to process in parallel during the `build` stage.
+pub const BUILD_CHUNK_NODES: usize = 1024;
+
 // Number of batched nodes processed and stored together in `populate_leaves` to
 // avoid single `push`es which degrades performance for `DiskStore`.
-pub const BUILD_LEAVES_BLOCK_SIZE: usize = 1024;
+pub const BUILD_LEAVES_BLOCK_SIZE: usize = 64 * BUILD_CHUNK_NODES;
 
-// Number of nodes to process in parallel during the `build` stage.
-pub const BUILD_CHUNK_NODES: usize = 64 * 1024;
+// FIXME: Hand-picked constants, some proper benchmarks should be done
+// to choose more appropriate values and document the decision.
 
 /// Merkle Tree.
 ///
