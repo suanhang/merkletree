@@ -96,7 +96,11 @@ pub trait Store<E: Element>:
     /// Creates a new store which can store up to `size` elements.
     // FIXME: Return errors on failure instead of panicking
     //  (see https://github.com/filecoin-project/merkle_light/issues/19).
-    fn new(size: usize) -> Self;
+    fn new(size: usize) -> Self {
+        Self::new_with_file(size, None)
+    }
+
+    fn new_with_file(size: usize, file: Option<File>) -> Self;
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self;
 
@@ -133,7 +137,10 @@ impl<E: Element> ops::Deref for VecStore<E> {
 }
 
 impl<E: Element> Store<E> for VecStore<E> {
-    fn new(size: usize) -> Self {
+    fn new_with_file(size: usize, file: Option<File>) -> Self {
+        if file.is_some() {
+            unimplemented!("Creating a new VecStore with a file is not supported");
+        }
         VecStore(Vec::with_capacity(size))
     }
 
@@ -225,9 +232,14 @@ impl<E: Element> ops::Deref for DiskStore<E> {
 
 impl<E: Element> Store<E> for DiskStore<E> {
     #[allow(unsafe_code)]
-    fn new(size: usize) -> Self {
+    fn new_with_file(size: usize, file: Option<File>) -> Self {
         let byte_len = E::byte_len() * size;
-        let file = tempfile().expect("couldn't create temp file");
+        let file = match file {
+            None => {
+                tempfile().expect("couldn't create temp file")
+            }
+            Some(file) => file,
+        };
         file.set_len(byte_len as u64)
             .unwrap_or_else(|_| panic!("couldn't set len of {}", byte_len));
 
