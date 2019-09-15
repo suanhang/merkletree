@@ -4,6 +4,7 @@ use proof::Proof;
 use rayon::prelude::*;
 use std::fs::File;
 use std::iter::FromIterator;
+use std::io::Result;
 use std::marker::PhantomData;
 use std::ops::{self, Index};
 use std::sync::{Arc, RwLock};
@@ -97,10 +98,10 @@ pub trait Store<E: Element>:
     // FIXME: Return errors on failure instead of panicking
     //  (see https://github.com/filecoin-project/merkle_light/issues/19).
     fn new(size: usize) -> Self {
-        Self::new_with_file(size, None)
+        Self::new_with_file(size, None).expect("new_with_file shouldn't fail is file option in None")
     }
 
-    fn new_with_file(size: usize, file: Option<File>) -> Self;
+    fn new_with_file(size: usize, file: Option<File>) -> Result<Self>;
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self;
 
@@ -137,11 +138,11 @@ impl<E: Element> ops::Deref for VecStore<E> {
 }
 
 impl<E: Element> Store<E> for VecStore<E> {
-    fn new_with_file(size: usize, file: Option<File>) -> Self {
+    fn new_with_file(size: usize, file: Option<File>) -> Result<Self> {
         if file.is_some() {
             unimplemented!("Creating a new VecStore with a file is not supported");
         }
-        VecStore(Vec::with_capacity(size))
+        Ok(VecStore(Vec::with_capacity(size)))
     }
 
     fn write_at(&mut self, el: E, i: usize) {
@@ -232,23 +233,22 @@ impl<E: Element> ops::Deref for DiskStore<E> {
 
 impl<E: Element> Store<E> for DiskStore<E> {
     #[allow(unsafe_code)]
-    fn new_with_file(size: usize, file: Option<File>) -> Self {
+    fn new_with_file(size: usize, file: Option<File>) -> Result<Self> {
         let byte_len = E::byte_len() * size;
         let file = match file {
             None => {
-                tempfile().expect("couldn't create temp file")
+                tempfile()?
             }
             Some(file) => file,
         };
-        file.set_len(byte_len as u64)
-            .unwrap_or_else(|_| panic!("couldn't set len of {}", byte_len));
+        file.set_len(byte_len as u64)?;
 
-        DiskStore {
+        Ok(DiskStore {
             len: 0,
             _e: Default::default(),
             file,
             store_size: byte_len,
-        }
+        })
     }
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self {
@@ -416,10 +416,13 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     }
 
     // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
-    pub fn from_stores(leaves: K, top_half: K, leafs: usize, build_top_half: bool) -> MerkleTree<T, A, K> {
+    pub fn new_with_files(size: usize, leaves_file: Option<File>, top_half_file: Option<File>, leafs: usize, build_top_half: bool) -> Result<MerkleTree<T, A, K>> {
+        let leaves = Store::new_with_file(size, leaves_file)?;
+        let top_half = Store::new_with_file(size, top_half_file)?;
+
         let pow = next_pow2(leafs);
 
-        if build_top_half {
+        Ok(if build_top_half {
             Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
         } else {
             MerkleTree {
@@ -431,7 +434,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
                 _a: PhantomData,
                 _t: PhantomData,
             }
-        }
+        })
     }
 
     #[inline]
