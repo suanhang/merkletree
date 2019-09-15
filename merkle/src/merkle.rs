@@ -422,6 +422,8 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         leafs: usize,
         build_top_half: bool,
     ) -> Result<MerkleTree<T, A, K>> {
+        let build_top_half = build_top_half || top_half_file.is_none();
+        
         let leaves = Store::new_with_file(size, leaves_file)?;
         let top_half = Store::new_with_file(size, top_half_file)?;
 
