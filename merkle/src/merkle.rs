@@ -416,17 +416,21 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     }
 
     // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
-    pub fn load_from_stores(leaves: K, top_half: K, leafs: usize) -> MerkleTree<T, A, K> {
+    pub fn from_stores(leaves: K, top_half: K, leafs: usize, build_top_half: bool) -> MerkleTree<T, A, K> {
         let pow = next_pow2(leafs);
 
-        MerkleTree {
-            root: top_half.read_at(top_half.len() - 1),
-            leaves,
-            top_half,
-            leafs,
-            height: log2_pow2(2 * pow),
-            _a: PhantomData,
-            _t: PhantomData,
+        if build_top_half {
+            Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
+        } else {
+            MerkleTree {
+                root: top_half.read_at(top_half.len() - 1),
+                leaves,
+                top_half,
+                leafs,
+                height: log2_pow2(2 * pow),
+                _a: PhantomData,
+                _t: PhantomData,
+            }
         }
     }
 
