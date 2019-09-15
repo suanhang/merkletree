@@ -3,8 +3,8 @@ use positioned_io::{ReadAt, WriteAt};
 use proof::Proof;
 use rayon::prelude::*;
 use std::fs::File;
-use std::iter::FromIterator;
 use std::io::Result;
+use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::{self, Index};
 use std::sync::{Arc, RwLock};
@@ -98,7 +98,8 @@ pub trait Store<E: Element>:
     // FIXME: Return errors on failure instead of panicking
     //  (see https://github.com/filecoin-project/merkle_light/issues/19).
     fn new(size: usize) -> Self {
-        Self::new_with_file(size, None).expect("new_with_file shouldn't fail is file option in None")
+        Self::new_with_file(size, None)
+            .expect("new_with_file shouldn't fail is file option in None")
     }
 
     fn new_with_file(size: usize, file: Option<File>) -> Result<Self>;
@@ -236,9 +237,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     fn new_with_file(size: usize, file: Option<File>) -> Result<Self> {
         let byte_len = E::byte_len() * size;
         let file = match file {
-            None => {
-                tempfile()?
-            }
+            None => tempfile()?,
             Some(file) => file,
         };
         file.set_len(byte_len as u64)?;
@@ -416,7 +415,13 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     }
 
     // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
-    pub fn new_with_files(size: usize, leaves_file: Option<File>, top_half_file: Option<File>, leafs: usize, build_top_half: bool) -> Result<MerkleTree<T, A, K>> {
+    pub fn new_with_files(
+        size: usize,
+        leaves_file: Option<File>,
+        top_half_file: Option<File>,
+        leafs: usize,
+        build_top_half: bool,
+    ) -> Result<MerkleTree<T, A, K>> {
         let leaves = Store::new_with_file(size, leaves_file)?;
         let top_half = Store::new_with_file(size, top_half_file)?;
 
