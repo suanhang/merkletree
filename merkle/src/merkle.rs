@@ -414,19 +414,13 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
 
-    // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
-    pub fn new_with_files(
-        size: usize,
-        leaves_file: Option<File>,
-        top_half_file: Option<File>,
+    // FIXME: Unify if we want to work either with stores or files.
+    pub fn new_with_stores(
+        leaves: K,
+        top_half: K,
         leafs: usize,
         build_top_half: bool,
     ) -> Result<MerkleTree<T, A, K>> {
-        let build_top_half = build_top_half || top_half_file.is_none();
-        
-        let leaves = Store::new_with_file(size, leaves_file)?;
-        let top_half = Store::new_with_file(size, top_half_file)?;
-
         let pow = next_pow2(leafs);
 
         Ok(if build_top_half {
@@ -442,6 +436,22 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
                 _t: PhantomData,
             }
         })
+    }
+
+    // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
+    pub fn new_with_files(
+        size: usize,
+        leaves_file: Option<File>,
+        top_half_file: Option<File>,
+        leafs: usize,
+        build_top_half: bool,
+    ) -> Result<MerkleTree<T, A, K>> {
+        let build_top_half = build_top_half || top_half_file.is_none();
+
+        let leaves = Store::new_with_file(size, leaves_file)?;
+        let top_half = Store::new_with_file(size, top_half_file)?;
+
+        Self::new_with_stores(leaves, top_half, leafs, build_top_half)
     }
 
     #[inline]
