@@ -104,6 +104,8 @@ pub trait Store<E: Element>:
 
     fn new_with_file(size: usize, file: Option<File>) -> Result<Self>;
 
+    fn load_from_file(size: usize, file: File) -> Result<Self>;
+
     fn new_from_slice(size: usize, data: &[u8]) -> Self;
 
     fn write_at(&mut self, el: E, i: usize);
@@ -144,6 +146,10 @@ impl<E: Element> Store<E> for VecStore<E> {
             unimplemented!("Creating a new VecStore with a file is not supported");
         }
         Ok(VecStore(Vec::with_capacity(size)))
+    }
+
+    fn load_from_file(size: usize, file: File) -> Result<Self> {
+        unimplemented!("");
     }
 
     fn write_at(&mut self, el: E, i: usize) {
@@ -248,6 +254,12 @@ impl<E: Element> Store<E> for DiskStore<E> {
             file,
             store_size: byte_len,
         })
+    }
+
+    fn load_from_file(size: usize, file: File) -> Result<Self> {
+        let mut store = Self::new_with_file(size, Some(file))?;
+        store.len = size;
+        Ok(store)
     }
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self {
@@ -438,18 +450,32 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         })
     }
 
-    // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
+    /// Create a MT from two files provided that represent the leaves and the top MT.
+    /// Depending on the value of `build_top_half` the MT will either just be loaded
+    /// from the file or the top half will actually be generated (hashed) on this call.
+    /// If files are not provided then it's assumed that temporary files are used instead
+    /// and then the top half will have to be built.
     pub fn new_with_files(
         size: usize,
         leaves_file: Option<File>,
         top_half_file: Option<File>,
         leafs: usize,
+        // FIXME: Remove `leafs` from `rust-fil-proofs` API (as with from_leaves_store).
         build_top_half: bool,
     ) -> Result<MerkleTree<T, A, K>> {
         let build_top_half = build_top_half || top_half_file.is_none();
 
-        let leaves = Store::new_with_file(size, leaves_file)?;
-        let top_half = Store::new_with_file(size, top_half_file)?;
+        let leaves = if let Some(file) = leaves_file {
+            Store::load_from_file(size, file)?
+        } else {
+            Store::new_with_file(size, None)?
+        };
+
+        let top_half = if build_top_half {
+            Store::new_with_file(size, top_half_file)?
+        } else {
+            Store::load_from_file(size, top_half_file.expect("can't load top half contents, no file provided"))?
+        };
 
         Self::new_with_stores(leaves, top_half, leafs, build_top_half)
     }
