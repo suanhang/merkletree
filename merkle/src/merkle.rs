@@ -104,7 +104,7 @@ pub trait Store<E: Element>:
 
     fn new_with_file(size: usize, file: Option<File>) -> Result<Self>;
 
-    fn load_from_file(size: usize, file: File) -> Result<Self>;
+    fn load_from_file(file: File) -> Result<Self>;
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self;
 
@@ -148,8 +148,9 @@ impl<E: Element> Store<E> for VecStore<E> {
         Ok(VecStore(Vec::with_capacity(size)))
     }
 
-    fn load_from_file(size: usize, file: File) -> Result<Self> {
-        unimplemented!("");
+    fn load_from_file(_file: File) -> Result<Self> {
+        unimplemented!("not implemented in VecStore");
+        // FIXME: Until we decide if we want to support `VecStore` in the MT cache.
     }
 
     fn write_at(&mut self, el: E, i: usize) {
@@ -256,10 +257,15 @@ impl<E: Element> Store<E> for DiskStore<E> {
         })
     }
 
-    fn load_from_file(size: usize, file: File) -> Result<Self> {
-        let mut store = Self::new_with_file(size, Some(file))?;
-        store.len = size;
-        Ok(store)
+    fn load_from_file(file: File) -> Result<Self> {
+        let file_size_bytes = file.metadata().unwrap().len() as usize;
+
+        Ok(DiskStore {
+            file,
+            store_size: file_size_bytes,
+            len: file_size_bytes / E::byte_len(),
+            _e: Default::default(),
+        })
     }
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self {
@@ -466,7 +472,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         let build_top_half = build_top_half || top_half_file.is_none();
 
         let leaves = if let Some(file) = leaves_file {
-            Store::load_from_file(size, file)?
+            Store::load_from_file(file)?
         } else {
             Store::new_with_file(size, None)?
         };
@@ -474,7 +480,9 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         let top_half = if build_top_half {
             Store::new_with_file(size, top_half_file)?
         } else {
-            Store::load_from_file(size, top_half_file.expect("can't load top half contents, no file provided"))?
+            Store::load_from_file(
+                top_half_file.expect("can't load top half contents, no file provided"),
+            )?
         };
 
         Self::new_with_stores(leaves, top_half, leafs, build_top_half)
