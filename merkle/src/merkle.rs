@@ -357,6 +357,11 @@ impl<E: Element> Store<E> for DiskStore<E> {
 }
 
 impl<E: Element> DiskStore<E> {
+    pub fn into_file(self) -> File {
+        self.sync();
+        self.file
+    }
+
     pub fn store_size(&self) -> usize {
         self.store_size
     }
