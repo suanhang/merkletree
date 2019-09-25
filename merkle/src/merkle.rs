@@ -388,6 +388,10 @@ impl<E: Element> DiskStore<E> {
             .write_at(start as u64, slice)
             .expect("failed to write file");
     }
+
+    pub fn into_file(self) -> File {
+        self.file
+    }
 }
 
 // FIXME: Fake `Clone` implementation to accommodate the artificial call in
@@ -413,6 +417,10 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
             x.hash(&mut a);
             a.hash()
         }))
+    }
+
+    pub fn into_stores(self) -> (K, K) {
+        (self.top_half, self.leaves)
     }
 
     /// Creates new merkle from an already allocated `Store` (used with
