@@ -106,6 +106,9 @@ pub trait Store<E: Element>:
 
     fn load_from_file(file: File) -> Result<Self>;
 
+    /// Return the underlying file (Valid for DiskStore only at the moment).
+    fn into_file(self) -> File;
+
     fn new_from_slice(size: usize, data: &[u8]) -> Self;
 
     fn write_at(&mut self, el: E, i: usize);
@@ -151,6 +154,11 @@ impl<E: Element> Store<E> for VecStore<E> {
     fn load_from_file(_file: File) -> Result<Self> {
         unimplemented!("not implemented in VecStore");
         // FIXME: Until we decide if we want to support `VecStore` in the MT cache.
+    }
+
+    fn into_file(self) -> File {
+        unimplemented!("not implemented in VecStore");
+        // FIXME: Same as `load_from_file`.
     }
 
     fn write_at(&mut self, el: E, i: usize) {
@@ -266,6 +274,10 @@ impl<E: Element> Store<E> for DiskStore<E> {
             len: file_size_bytes / E::byte_len(),
             _e: Default::default(),
         })
+    }
+
+    fn into_file(self) -> File {
+        self.file
     }
 
     fn new_from_slice(size: usize, data: &[u8]) -> Self {
@@ -388,10 +400,6 @@ impl<E: Element> DiskStore<E> {
             .write_at(start as u64, slice)
             .expect("failed to write file");
     }
-
-    pub fn into_file(self) -> File {
-        self.file
-    }
 }
 
 // FIXME: Fake `Clone` implementation to accommodate the artificial call in
@@ -419,8 +427,9 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         }))
     }
 
+    /// Return underlying stores (for both leaves and top half) consuming the MT.
     pub fn into_stores(self) -> (K, K) {
-        (self.top_half, self.leaves)
+        (self.leaves, self.top_half)
     }
 
     /// Creates new merkle from an already allocated `Store` (used with
