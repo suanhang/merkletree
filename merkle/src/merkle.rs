@@ -444,7 +444,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
     pub fn from_leaves_store(leaves: K, leafs: usize) -> MerkleTree<T, A, K> {
         let pow = next_pow2(leafs);
 
-        let top_half = K::new(pow);
+        let top_half = K::new(pow - 1);
 
         Self::build(leaves, top_half, leafs, log2_pow2(2 * pow))
     }
@@ -847,7 +847,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> MerkleTree<T, A, K> {
         let pow = next_pow2(leafs_count);
 
         let leaves = K::new_from_slice(pow, leafs);
-        let top_half = K::new(pow);
+        let top_half = K::new(pow - 1);
 
         assert!(leafs_count > 1);
         Self::build(leaves, top_half, leafs_count, log2_pow2(2 * pow))
@@ -879,7 +879,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromIndexedParallelIterator<T>
         let pow = next_pow2(leafs);
 
         let mut leaves = K::new(pow);
-        let top_half = K::new(pow);
+        let top_half = K::new(pow - 1);
 
         populate_leaves_par::<T, A, K, _>(&mut leaves, iter);
 
@@ -898,7 +898,7 @@ impl<T: Element, A: Algorithm<T>, K: Store<T>> FromIterator<T> for MerkleTree<T,
         let pow = next_pow2(leafs);
 
         let mut leaves = K::new(pow);
-        let top_half = K::new(pow);
+        let top_half = K::new(pow - 1);
 
         populate_leaves::<T, A, K, I>(&mut leaves, iter);
 
