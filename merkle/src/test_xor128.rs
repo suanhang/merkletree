@@ -3,12 +3,15 @@
 use hash::*;
 use merkle::FromIndexedParallelIterator;
 use merkle::{log2_pow2, next_pow2};
-use merkle::{DiskStore, Element, MerkleTree, VecStore, SMALL_TREE_BUILD};
+use merkle::{DiskStore, Element, MerkleTree, Store, VecStore, SMALL_TREE_BUILD};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::hash::Hasher;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::FromIterator;
+use tempfile;
 
 const SIZE: usize = 0x10;
 
@@ -315,4 +318,76 @@ fn test_large_tree() {
             }));
         assert_eq!(mt_disk.len(), 2 * count - 1);
     }
+}
+
+#[test]
+fn save_reload_disk_store() {
+    // Create some data, construct a `VecStore` MT with it and recover
+    // its stores.
+    let leaves: Vec<_> = {
+        let mut a = XOR128::new();
+        [1, 2, 3, 4, 5, 6, 7, 8]
+            .iter()
+            .map(|x| {
+                a.reset();
+                x.hash(&mut a);
+                a.hash()
+            })
+            .collect()
+    };
+    let vec_mt: MerkleTree<_, XOR128, VecStore<_>> =
+        MerkleTree::from_iter(leaves.clone().into_iter());
+    let (leaves_vec_store, top_half_vec_store) = vec_mt.into_stores();
+
+    // Write that same data to a file and construct a `DiskStore` now
+    // (also recovering its resulting stores).
+    let dir = tempfile::TempDir::new().unwrap().into_path();
+    let filename = dir.join("leaves-disk-store");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(filename)
+        .unwrap();
+
+    let leaves_data: Vec<u8> = leaves_vec_store
+        .read_range(0..leaves.len())
+        .into_iter()
+        .map(|x| x.as_ref().to_vec())
+        .flatten()
+        .collect();
+    let bytes_written = file.write(&leaves_data).unwrap();
+    assert_eq!(bytes_written, leaves_data.len());
+    file.sync_all().unwrap();
+
+    let leaves_store: DiskStore<_> = Store::load_from_file(file).unwrap();
+    let disk_mt: MerkleTree<_, XOR128, _> =
+        MerkleTree::from_leaves_store(leaves_store, leaves.len());
+    let (leaves_disk_store, top_half_disk_store) = disk_mt.into_stores();
+
+    // Recover the file from the top half, we didn't create this one (as opposed to
+    // the leaves), the MT built it and stored it. It should match the one from the
+    // `VecStore` MT.
+    let mut top_half_disk = top_half_disk_store.into_file();
+    let mut recovered_top_half_data = Vec::new();
+    top_half_disk.seek(SeekFrom::Start(0)).unwrap();
+    top_half_disk
+        .read_to_end(&mut recovered_top_half_data)
+        .unwrap();
+    assert_eq!(
+        top_half_vec_store
+            .read_range(0..leaves.len() - 1)
+            .into_iter()
+            .map(|x| x.as_ref().to_vec())
+            .flatten()
+            .collect::<Vec<u8>>(),
+        recovered_top_half_data
+    );
+
+    // Also for correctness check that the leaves still match.
+    let mut leaves_disk = leaves_disk_store.into_file();
+    let mut recovered_leaves_data = Vec::new();
+    leaves_disk.seek(SeekFrom::Start(0)).unwrap();
+    leaves_disk.read_to_end(&mut recovered_leaves_data).unwrap();
+    assert_eq!(recovered_leaves_data, leaves_data);
 }
