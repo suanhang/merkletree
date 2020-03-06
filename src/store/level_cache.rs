@@ -170,7 +170,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
             len: 0,
             elem_len: E::byte_len(),
             file,
-            data_width: size,
+            data_width: leafs,
             cache_index_start,
             store_size,
             loaded_from_disk: false,
