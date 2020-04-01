@@ -32,8 +32,8 @@ pub struct Proof<T: Eq + Clone + AsRef<[u8]>, BaseTreeArity: Unsigned = U2> {
     // be None at the base layer.
     pub sub_tree_proof: Option<Box<Proof<T, BaseTreeArity>>>,
 
-    top_layer_nodes: usize,      // arity of top layer
-    sub_tree_layer_nodes: usize, // arity of sub-tree layer
+    pub top_layer_nodes: usize,      // arity of top layer
+    pub sub_tree_layer_nodes: usize, // arity of sub-tree layer
 
     lemma: Vec<T>,
     path: Vec<usize>, // branch index
