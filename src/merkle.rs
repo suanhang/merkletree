@@ -125,11 +125,11 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
         }
     }
 }
-impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned> std::fmt::Debug for Data<E, A, S, BaseTreeArity, SubTreeArity>
+impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
+    std::fmt::Debug for Data<E, A, S, BaseTreeArity, SubTreeArity>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("enum Data")
-            .finish()
+        f.debug_struct("enum Data").finish()
     }
 }
 
@@ -160,7 +160,14 @@ where
     _tta: PhantomData<TopTreeArity>,
 }
 
-impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned, TopTreeArity: Unsigned> std::fmt::Debug for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+impl<
+        E: Element,
+        A: Algorithm<E>,
+        S: Store<E>,
+        BaseTreeArity: Unsigned,
+        SubTreeArity: Unsigned,
+        TopTreeArity: Unsigned,
+    > std::fmt::Debug for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MerkleTree")
@@ -172,7 +179,6 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
             .finish()
     }
 }
-
 
 /// Element stored in the merkle tree.
 pub trait Element: Ord + Clone + AsRef<[u8]> + Sync + Send + Default + std::fmt::Debug {
