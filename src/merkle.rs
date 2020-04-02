@@ -75,7 +75,7 @@ pub const BUILD_DATA_BLOCK_SIZE: usize = 64 * BUILD_CHUNK_NODES;
 /// layer merkle tree without layers (i.e. a conventional merkle
 /// tree).
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 enum Data<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
 {
@@ -125,9 +125,16 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
         }
     }
 }
+impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned> std::fmt::Debug for Data<E, A, S, BaseTreeArity, SubTreeArity>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("enum Data")
+            .finish()
+    }
+}
 
 #[allow(clippy::type_complexity)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MerkleTree<E, A, S, BaseTreeArity = U2, SubTreeArity = U0, TopTreeArity = U0>
 where
     E: Element,
@@ -152,6 +159,20 @@ where
     _sta: PhantomData<SubTreeArity>,
     _tta: PhantomData<TopTreeArity>,
 }
+
+impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned, TopTreeArity: Unsigned> std::fmt::Debug for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MerkleTree")
+            .field("data", &self.data)
+            .field("leafs", &self.leafs)
+            .field("len", &self.len)
+            .field("height", &self.height)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
 
 /// Element stored in the merkle tree.
 pub trait Element: Ord + Clone + AsRef<[u8]> + Sync + Send + Default + std::fmt::Debug {

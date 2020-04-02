@@ -32,8 +32,8 @@ pub struct Proof<T: Eq + Clone + AsRef<[u8]>, BaseTreeArity: Unsigned = U2> {
     // be None at the base layer.
     pub sub_tree_proof: Option<Box<Proof<T, BaseTreeArity>>>,
 
-    pub top_layer_nodes: usize,      // arity of top layer
-    pub sub_tree_layer_nodes: usize, // arity of sub-tree layer
+    top_layer_nodes: usize,      // arity of top layer
+    sub_tree_layer_nodes: usize, // arity of sub-tree layer
 
     lemma: Vec<T>,
     path: Vec<usize>, // branch index
@@ -221,6 +221,14 @@ impl<T: Eq + Clone + AsRef<[u8]>, BaseTreeArity: Unsigned> Proof<T, BaseTreeArit
     /// Returns the lemma of this proof as mutable.
     pub fn lemma_mut(&mut self) -> &mut Vec<T> {
         &mut self.lemma
+    }
+
+    pub fn top_layer_nodes(&self) -> usize {
+        self.top_layer_nodes
+    }
+
+    pub fn sub_layer_nodes(&self) -> usize {
+        self.sub_tree_layer_nodes
     }
 }
 
