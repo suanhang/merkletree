@@ -658,8 +658,6 @@ impl<
             sub_trees.push(MerkleTree::from_trees(group)?);
         }
 
-        // If we are building a compound tree with no sub-trees,
-        // all properties revert to the single tree properties.
         let (leafs, len, height, root) = {
             // Total number of leafs in the compound tree is the combined leafs total of all subtrees.
             let leafs = sub_trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
@@ -1820,6 +1818,10 @@ pub fn get_merkle_tree_cache_size(leafs: usize, branches: usize, levels: usize) 
 }
 
 pub fn is_merkle_tree_size_valid(leafs: usize, branches: usize) -> bool {
+    if branches == 0 || leafs != next_pow2(leafs) || branches != next_pow2(branches) {
+        return false;
+    }
+
     let mut cur = leafs;
     let shift = log2_pow2(branches);
     while cur != 1 {

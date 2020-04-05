@@ -265,12 +265,19 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         let cache_size = get_merkle_tree_cache_size(size, branches, config.levels)? * E::byte_len();
         let cache_index_start = store_range - cache_size;
 
+        // For a true v1 compatible store, this check should remain,
+        // but since the store structure is identical otherwise this
+        // method can be re-used to open v2 stores, so long as an
+        // external_reader is set afterward.
+
         // Sanity checks that the StoreConfig levels matches this
         // particular on-disk file.
+        /*
         ensure!(
             store_size == size * E::byte_len() + cache_size,
             "Inconsistent store size detected"
         );
+         */
 
         Ok(LevelCacheStore {
             len: store_range / E::byte_len(),
