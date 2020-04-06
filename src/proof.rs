@@ -30,7 +30,7 @@ use crate::test_common::{get_vec_tree_from_slice, Item, XOR128};
 pub struct Proof<T: Eq + Clone + AsRef<[u8]>, BaseTreeArity: Unsigned = U2> {
     // Optional proofs at immediate lower level from current.  Should
     // be None at the base layer.
-    sub_tree_proof: Option<Box<Proof<T, BaseTreeArity>>>,
+    pub sub_tree_proof: Option<Box<Proof<T, BaseTreeArity>>>,
 
     top_layer_nodes: usize,      // arity of top layer
     sub_tree_layer_nodes: usize, // arity of sub-tree layer
@@ -221,6 +221,14 @@ impl<T: Eq + Clone + AsRef<[u8]>, BaseTreeArity: Unsigned> Proof<T, BaseTreeArit
     /// Returns the lemma of this proof as mutable.
     pub fn lemma_mut(&mut self) -> &mut Vec<T> {
         &mut self.lemma
+    }
+
+    pub fn top_layer_nodes(&self) -> usize {
+        self.top_layer_nodes
+    }
+
+    pub fn sub_layer_nodes(&self) -> usize {
+        self.sub_tree_layer_nodes
     }
 }
 

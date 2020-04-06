@@ -75,7 +75,7 @@ pub const BUILD_DATA_BLOCK_SIZE: usize = 64 * BUILD_CHUNK_NODES;
 /// layer merkle tree without layers (i.e. a conventional merkle
 /// tree).
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 enum Data<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
 {
@@ -125,9 +125,16 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
         }
     }
 }
+impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
+    std::fmt::Debug for Data<E, A, S, BaseTreeArity, SubTreeArity>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("enum Data").finish()
+    }
+}
 
 #[allow(clippy::type_complexity)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MerkleTree<E, A, S, BaseTreeArity = U2, SubTreeArity = U0, TopTreeArity = U0>
 where
     E: Element,
@@ -151,6 +158,26 @@ where
     _bta: PhantomData<BaseTreeArity>,
     _sta: PhantomData<SubTreeArity>,
     _tta: PhantomData<TopTreeArity>,
+}
+
+impl<
+        E: Element,
+        A: Algorithm<E>,
+        S: Store<E>,
+        BaseTreeArity: Unsigned,
+        SubTreeArity: Unsigned,
+        TopTreeArity: Unsigned,
+    > std::fmt::Debug for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MerkleTree")
+            .field("data", &self.data)
+            .field("leafs", &self.leafs)
+            .field("len", &self.len)
+            .field("height", &self.height)
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 /// Element stored in the merkle tree.
@@ -228,6 +255,56 @@ impl<
         }
 
         Self::from_trees(trees)
+    }
+
+    /// Given a set of StoreConfig's (i.e on-disk references to
+    /// levelcache stores) and replica_paths, instantiate each sub tree
+    /// and return a compound merkle tree with them.  The ordering of
+    /// the trees is significant, as trees are leaf indexed /
+    /// addressable in the same sequence that they are provided here.
+    #[allow(clippy::type_complexity)]
+    pub fn from_sub_tree_store_configs_and_replicas(
+        leafs: usize,
+        configs: &[StoreConfig],
+        replica_paths: &[PathBuf],
+    ) -> Result<
+        MerkleTree<
+            E,
+            A,
+            LevelCacheStore<E, std::fs::File>,
+            BaseTreeArity,
+            SubTreeArity,
+            TopTreeArity,
+        >,
+    > {
+        ensure!(
+            configs.len() == replica_paths.len(),
+            "Config and Replica list lengths are invalid"
+        );
+
+        let sub_tree_count = TopTreeArity::to_usize();
+
+        let mut start = 0;
+        let mut end = configs.len() / sub_tree_count;
+        let mut trees = Vec::with_capacity(sub_tree_count);
+
+        for _ in 0..sub_tree_count {
+            trees.push(MerkleTree::<
+                E,
+                A,
+                LevelCacheStore<_, _>,
+                BaseTreeArity,
+                SubTreeArity,
+            >::from_store_configs_and_replicas(
+                leafs,
+                &configs[start..end],
+                &replica_paths[start..end],
+            )?);
+            start = end;
+            end += configs.len() / sub_tree_count;
+        }
+
+        Self::from_sub_trees(trees)
     }
 }
 
@@ -512,14 +589,7 @@ impl<
 
         // If we are building a compound tree with no sub-trees,
         // all properties revert to the single tree properties.
-        let (leafs, len, height, root) = if top_layer_nodes == 0 {
-            (
-                trees[0].leafs(),
-                trees[0].len(),
-                trees[0].height(),
-                trees[0].root(),
-            )
-        } else {
+        let (leafs, len, height, root) = {
             // Total number of leafs in the compound tree is the combined leafs total of all subtrees.
             let leafs = trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
             // Total length of the compound tree is the combined length of all subtrees plus the root.
@@ -535,6 +605,75 @@ impl<
 
         Ok(MerkleTree {
             data: Data::TopTree(trees),
+            leafs,
+            len,
+            height,
+            root,
+            _a: PhantomData,
+            _e: PhantomData,
+            _bta: PhantomData,
+            _sta: PhantomData,
+            _tta: PhantomData,
+        })
+    }
+
+    /// Creates new top layer merkle tree from a vector of merkle
+    /// trees by first constructing the appropriate sub-trees.  The
+    /// ordering of the trees is significant, as trees are leaf
+    /// indexed / addressable in the same sequence that they are
+    /// provided here.
+    pub fn from_sub_trees_as_trees(
+        mut trees: Vec<MerkleTree<E, A, S, BaseTreeArity>>,
+    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        ensure!(
+            TopTreeArity::to_usize() > 0,
+            "Cannot use from_sub_trees if not constructing a structure with sub-trees"
+        );
+        ensure!(
+            trees.iter().all(|ref mt| mt.height() == trees[0].height()),
+            "All passed in trees must have the same height"
+        );
+        ensure!(
+            trees.iter().all(|ref mt| mt.len() == trees[0].len()),
+            "All passed in trees must have the same length"
+        );
+
+        let sub_tree_count = TopTreeArity::to_usize();
+        let top_layer_nodes = sub_tree_count * SubTreeArity::to_usize();
+        ensure!(
+            trees.len() == top_layer_nodes,
+            "Length of trees MUST equal the number of top layer nodes"
+        );
+
+        // Group the trees appropriately into sub-tree ready vectors.
+        let mut grouped_trees = Vec::with_capacity(sub_tree_count);
+        for _ in (0..sub_tree_count).step_by(trees.len() / sub_tree_count) {
+            grouped_trees.push(trees.split_off(trees.len() / sub_tree_count));
+        }
+        grouped_trees.insert(0, trees);
+
+        let mut sub_trees: Vec<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>> =
+            Vec::with_capacity(sub_tree_count);
+        for group in grouped_trees {
+            sub_trees.push(MerkleTree::from_trees(group)?);
+        }
+
+        let (leafs, len, height, root) = {
+            // Total number of leafs in the compound tree is the combined leafs total of all subtrees.
+            let leafs = sub_trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
+            // Total length of the compound tree is the combined length of all subtrees plus the root.
+            let len = sub_trees.iter().fold(0, |len, mt| len + mt.len()) + 1;
+            // Total height of the compound tree is the height of any of the sub-trees to top-layer plus root.
+            let height = sub_trees[0].height() + 1;
+            // Calculate the compound root by hashing the top layer roots together.
+            let roots: Vec<E> = sub_trees.iter().map(|x| x.root()).collect();
+            let root = A::default().multi_node(&roots, 1);
+
+            (leafs, len, height, root)
+        };
+
+        Ok(MerkleTree {
+            data: Data::TopTree(sub_trees),
             leafs,
             len,
             height,
@@ -632,6 +771,36 @@ impl<
         }
 
         MerkleTree::from_trees(trees)
+    }
+
+    /// Given a set of StoreConfig's (i.e on-disk references to
+    /// levelcache stores) and replica_paths, instantiate each sub tree
+    /// and return a compound merkle tree with them.  The ordering of
+    /// the trees is significant, as trees are leaf indexed /
+    /// addressable in the same sequence that they are provided here.
+    #[allow(clippy::type_complexity)]
+    pub fn from_sub_tree_store_configs(
+        leafs: usize,
+        configs: &[StoreConfig],
+    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        let tree_count = TopTreeArity::to_usize();
+
+        let mut start = 0;
+        let mut end = configs.len() / tree_count;
+
+        let mut trees = Vec::with_capacity(tree_count);
+        for _ in 0..tree_count {
+            trees.push(
+                MerkleTree::<E, A, S, BaseTreeArity, SubTreeArity>::from_store_configs(
+                    leafs,
+                    &configs[start..end],
+                )?,
+            );
+            start = end;
+            end += configs.len() / tree_count;
+        }
+
+        Self::from_sub_trees(trees)
     }
 
     #[inline]
@@ -802,6 +971,54 @@ impl<
 
     /// Generate merkle sub-tree inclusion proof for leaf `i` using
     /// partial trees built from cached data if needed at that layer.
+    fn gen_cached_top_tree_proof<Arity: Unsigned>(
+        &self,
+        i: usize,
+        levels: usize,
+    ) -> Result<Proof<E, BaseTreeArity>> {
+        ensure!(Arity::to_usize() != 0, "Invalid top-tree arity");
+        ensure!(
+            i < self.leafs,
+            "{} is out of bounds (max: {})",
+            i,
+            self.leafs
+        ); // i in [0 .. self.leafs)
+
+        // Locate the sub-tree the leaf is contained in.
+        ensure!(self.data.sub_trees().is_some(), "sub trees required");
+        let trees = &self.data.sub_trees().unwrap();
+        let tree_index = i / (self.leafs / Arity::to_usize());
+        let tree = &trees[tree_index];
+        let tree_leafs = tree.leafs();
+
+        // Get the leaf index within the sub-tree.
+        let leaf_index = i % tree_leafs;
+
+        // Generate the proof that will validate to the provided
+        // sub-tree root (note the branching factor of B).
+        let sub_tree_proof = tree.gen_cached_proof(leaf_index, levels)?;
+
+        // Construct the top layer proof.  'lemma' length is
+        // top_layer_nodes - 1 + root == top_layer_nodes
+        let mut path: Vec<usize> = Vec::with_capacity(1); // path - 1
+        let mut lemma: Vec<E> = Vec::with_capacity(Arity::to_usize());
+        for i in 0..Arity::to_usize() {
+            if i != tree_index {
+                lemma.push(trees[i].root())
+            }
+        }
+
+        lemma.push(self.root());
+        path.push(tree_index);
+
+        // Generate the final compound tree proof which is composed of
+        // a sub-tree proof of branching factor B and a top-level
+        // proof with a branching factor of SubTreeArity.
+        Proof::new::<TopTreeArity, SubTreeArity>(Some(Box::new(sub_tree_proof)), lemma, path)
+    }
+
+    /// Generate merkle sub-tree inclusion proof for leaf `i` using
+    /// partial trees built from cached data if needed at that layer.
     fn gen_cached_sub_tree_proof<Arity: Unsigned>(
         &self,
         i: usize,
@@ -855,7 +1072,7 @@ impl<
     #[allow(clippy::type_complexity)]
     pub fn gen_cached_proof(&self, i: usize, levels: usize) -> Result<Proof<E, BaseTreeArity>> {
         match &self.data {
-            Data::TopTree(_) => self.gen_cached_sub_tree_proof::<TopTreeArity>(i, levels),
+            Data::TopTree(_) => self.gen_cached_top_tree_proof::<TopTreeArity>(i, levels),
             Data::SubTree(_) => self.gen_cached_sub_tree_proof::<SubTreeArity>(i, levels),
             Data::BaseTree(_) => {
                 ensure!(
@@ -1601,6 +1818,10 @@ pub fn get_merkle_tree_cache_size(leafs: usize, branches: usize, levels: usize) 
 }
 
 pub fn is_merkle_tree_size_valid(leafs: usize, branches: usize) -> bool {
+    if branches == 0 || leafs != next_pow2(leafs) || branches != next_pow2(branches) {
+        return false;
+    }
+
     let mut cur = leafs;
     let shift = log2_pow2(branches);
     while cur != 1 {
