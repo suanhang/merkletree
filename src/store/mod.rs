@@ -44,21 +44,23 @@ pub use vec::VecStore;
 
 #[derive(Clone)]
 pub struct ExternalReader<R: Read + Send + Sync> {
+    pub offset: usize,
     pub source: R,
     pub read_fn: fn(start: usize, end: usize, buf: &mut [u8], source: &R) -> Result<usize>,
 }
 
 impl<R: Read + Send + Sync> ExternalReader<R> {
     pub fn read(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<usize> {
-        (self.read_fn)(start, end, buf, &self.source)
+        (self.read_fn)(start + self.offset, end + self.offset, buf, &self.source)
     }
 }
 
 impl ExternalReader<std::fs::File> {
-    pub fn new_from_path(path: &PathBuf) -> Result<Self> {
-        let reader = OpenOptions::new().read(true).open(path)?;
+    pub fn new_from_config(replica_config: &ReplicaConfig, index: usize) -> Result<Self> {
+        let reader = OpenOptions::new().read(true).open(&replica_config.path)?;
 
         Ok(ExternalReader {
+            offset: replica_config.offsets[index],
             source: reader,
             read_fn: |start, end, buf: &mut [u8], reader: &std::fs::File| {
                 reader.read_exact_at(start as u64, &mut buf[0..end - start])?;
@@ -66,6 +68,10 @@ impl ExternalReader<std::fs::File> {
                 Ok(end - start)
             },
         })
+    }
+
+    pub fn new_from_path(path: &PathBuf) -> Result<Self> {
+        Self::new_from_config(&ReplicaConfig::from(path), 0)
     }
 }
 
@@ -90,6 +96,30 @@ pub enum StoreConfigDataVersion {
 }
 
 const DEFAULT_STORE_CONFIG_DATA_VERSION: u32 = StoreConfigDataVersion::Two as u32;
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ReplicaConfig {
+    pub path: PathBuf,
+    pub offsets: Vec<usize>,
+}
+
+impl ReplicaConfig {
+    pub fn new<T: Into<PathBuf>>(path: T, offsets: Vec<usize>) -> Self {
+        ReplicaConfig {
+            path: path.into(),
+            offsets,
+        }
+    }
+}
+
+impl From<&PathBuf> for ReplicaConfig {
+    fn from(path: &PathBuf) -> Self {
+        ReplicaConfig {
+            path: path.clone(),
+            offsets: vec![0],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct StoreConfig {
