@@ -101,10 +101,11 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         // LevelCacheStore on disk file is only the cached data, so
         // the file size dictates the cache_size.  Calculate cache
         // start and the updated size with repect to the file size.
-        let cache_size = get_merkle_tree_cache_size(size, branches, config.levels)? * E::byte_len();
+        let cache_size =
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
         let cache_index_start = store_range - cache_size;
 
-        // Sanity checks that the StoreConfig levels matches this
+        // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.  Since an external reader *is*
         // set, we check to make sure that the data on disk is *only*
         // the cached element data.
@@ -162,7 +163,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // Calculate cache start and the updated size with repect to
         // the data size.
         let cache_size =
-            get_merkle_tree_cache_size(leafs, branches, config.levels)? * E::byte_len();
+            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * E::byte_len();
         let cache_index_start = store_size - cache_size;
 
         file.set_len(store_size as u64)?;
@@ -262,7 +263,8 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
 
         // Calculate cache start and the updated size with repect to
         // the data size.
-        let cache_size = get_merkle_tree_cache_size(size, branches, config.levels)? * E::byte_len();
+        let cache_size =
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
         let cache_index_start = store_range - cache_size;
 
         // For a true v1 compatible store, this check should remain,
@@ -270,7 +272,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // method can be re-used to open v2 stores, so long as an
         // external_reader is set afterward.
 
-        // Sanity checks that the StoreConfig levels matches this
+        // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.
         /*
         ensure!(
@@ -510,7 +512,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         let shift = log2_pow2(branches);
 
         // Both in terms of elements, not bytes.
-        let cache_size = get_merkle_tree_cache_size(leafs, branches, config.levels)?;
+        let cache_size = get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)?;
         let cache_index_start = (get_merkle_tree_len(leafs, branches)?) - cache_size;
 
         while width > 1 {
@@ -630,9 +632,10 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
 
         // Calculate cache start and the updated size with repect to
         // the data size.
-        let cache_size = get_merkle_tree_cache_size(size, branches, config.levels)? * E::byte_len();
+        let cache_size =
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
 
-        // Sanity checks that the StoreConfig levels matches this
+        // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.
         Ok(store_size == size * E::byte_len() + cache_size)
     }
@@ -663,9 +666,10 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         // LevelCacheStore on disk file is only the cached data, so
         // the file size dictates the cache_size.  Calculate cache
         // start and the updated size with repect to the file size.
-        let cache_size = get_merkle_tree_cache_size(size, branches, config.levels)? * E::byte_len();
+        let cache_size =
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
 
-        // Sanity checks that the StoreConfig levels matches this
+        // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.  Since an external reader *is*
         // set, we check to make sure that the data on disk is *only*
         // the cached element data.

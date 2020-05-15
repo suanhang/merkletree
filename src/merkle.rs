@@ -977,7 +977,7 @@ impl<
     fn gen_cached_top_tree_proof<Arity: Unsigned>(
         &self,
         i: usize,
-        levels: usize,
+        rows_to_discard: usize,
     ) -> Result<Proof<E, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid top-tree arity");
         ensure!(
@@ -999,7 +999,7 @@ impl<
 
         // Generate the proof that will validate to the provided
         // sub-tree root (note the branching factor of B).
-        let sub_tree_proof = tree.gen_cached_proof(leaf_index, levels)?;
+        let sub_tree_proof = tree.gen_cached_proof(leaf_index, rows_to_discard)?;
 
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
@@ -1025,7 +1025,7 @@ impl<
     fn gen_cached_sub_tree_proof<Arity: Unsigned>(
         &self,
         i: usize,
-        levels: usize,
+        rows_to_discard: usize,
     ) -> Result<Proof<E, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid sub-tree arity");
         ensure!(
@@ -1047,7 +1047,7 @@ impl<
 
         // Generate the proof that will validate to the provided
         // sub-tree root (note the branching factor of B).
-        let sub_tree_proof = tree.gen_cached_proof(leaf_index, levels)?;
+        let sub_tree_proof = tree.gen_cached_proof(leaf_index, rows_to_discard)?;
 
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
@@ -1073,10 +1073,14 @@ impl<
     /// Return value is a Result tuple of the proof and the partial
     /// tree that was constructed.
     #[allow(clippy::type_complexity)]
-    pub fn gen_cached_proof(&self, i: usize, levels: usize) -> Result<Proof<E, BaseTreeArity>> {
+    pub fn gen_cached_proof(
+        &self,
+        i: usize,
+        rows_to_discard: usize,
+    ) -> Result<Proof<E, BaseTreeArity>> {
         match &self.data {
-            Data::TopTree(_) => self.gen_cached_top_tree_proof::<TopTreeArity>(i, levels),
-            Data::SubTree(_) => self.gen_cached_sub_tree_proof::<SubTreeArity>(i, levels),
+            Data::TopTree(_) => self.gen_cached_top_tree_proof::<TopTreeArity>(i, rows_to_discard),
+            Data::SubTree(_) => self.gen_cached_sub_tree_proof::<SubTreeArity>(i, rows_to_discard),
             Data::BaseTree(_) => {
                 ensure!(
                     i < self.leafs,
@@ -1094,7 +1098,7 @@ impl<
 
                 let branches = BaseTreeArity::to_usize();
                 let total_size = get_merkle_tree_len(self.leafs, branches)?;
-                let cache_size = get_merkle_tree_cache_size(self.leafs, branches, levels)?;
+                let cache_size = get_merkle_tree_cache_size(self.leafs, branches, rows_to_discard)?;
                 ensure!(
                     cache_size < total_size,
                     "Generate a partial proof with all data available?"
@@ -1112,14 +1116,14 @@ impl<
                 // Calculate the subset of the base layer data width that we
                 // need in order to build the partial tree required to build
                 // the proof (termed 'segment_width'), given the data
-                // configuration specified by 'levels'.
+                // configuration specified by 'rows_to_discard'.
                 let segment_width = self.leafs / cached_leafs;
                 let segment_start = (i / segment_width) * segment_width;
                 let segment_end = segment_start + segment_width;
 
-                debug!("leafs {}, branches {}, total size {}, total height {}, cache_size {}, cached levels above base {}, \
+                debug!("leafs {}, branches {}, total size {}, total height {}, cache_size {}, rows_to_discard {}, \
                         partial_height {}, cached_leafs {}, segment_width {}, segment range {}-{} for {}",
-                       self.leafs, branches, total_size, self.height, cache_size, levels, partial_height,
+                       self.leafs, branches, total_size, self.height, cache_size, rows_to_discard, partial_height,
                        cached_leafs, segment_width, segment_start, segment_end, i);
 
                 // Copy the proper segment of the base data into memory and
@@ -1155,7 +1159,7 @@ impl<
 
                 // Generate entire proof with access to the base data, the
                 // cached data, and the partial tree.
-                let proof = self.gen_proof_with_partial_tree(i, levels, &partial_tree)?;
+                let proof = self.gen_proof_with_partial_tree(i, rows_to_discard, &partial_tree)?;
 
                 debug!(
                     "generated partial_tree of height {} and len {} with {} branches for proof at {}",
@@ -1175,7 +1179,7 @@ impl<
     fn gen_proof_with_partial_tree(
         &self,
         i: usize,
-        levels: usize,
+        rows_to_discard: usize,
         partial_tree: &MerkleTree<E, A, VecStore<E>, BaseTreeArity>,
     ) -> Result<Proof<E, BaseTreeArity>> {
         ensure!(
@@ -1197,7 +1201,7 @@ impl<
 
         let data_width = width;
         let total_size = get_merkle_tree_len(data_width, branches)?;
-        let cache_size = get_merkle_tree_cache_size(self.leafs, branches, levels)?;
+        let cache_size = get_merkle_tree_cache_size(self.leafs, branches, rows_to_discard)?;
         let cache_index_start = total_size - cache_size;
         let cached_leafs = get_merkle_tree_leafs(cache_size, branches)?;
         ensure!(
@@ -1801,17 +1805,28 @@ pub fn get_merkle_tree_len(leafs: usize, branches: usize) -> Result<usize> {
 }
 
 // Tree length calculation given the number of leafs in the tree, the
-// cached levels above the base, and the branches.
-pub fn get_merkle_tree_cache_size(leafs: usize, branches: usize, levels: usize) -> Result<usize> {
+// rows_to_discard, and the branches.
+pub fn get_merkle_tree_cache_size(
+    leafs: usize,
+    branches: usize,
+    rows_to_discard: usize,
+) -> Result<usize> {
     let shift = log2_pow2(branches);
     let len = get_merkle_tree_len(leafs, branches)?;
     let mut height = get_merkle_tree_height(leafs, branches);
-    let stop_height = height - levels;
+    ensure!(
+        height - 1 > rows_to_discard,
+        "Cannot discard all rows except for the base"
+    );
+
+    // 'height - 1' means that we start discarding rows above the base
+    // layer, which is included in the current height.
+    let cache_base = height - 1 - rows_to_discard;
 
     let mut cache_size = len;
     let mut cur_leafs = leafs;
 
-    while height > stop_height {
+    while height > cache_base {
         cache_size -= cur_leafs;
         cur_leafs >>= shift; // cur /= branches
         height -= 1;
@@ -2007,4 +2022,37 @@ fn test_get_merkle_tree_methods() {
 
     assert!(get_merkle_tree_leafs(1398102, 4).is_err());
     assert!(get_merkle_tree_leafs(299594, 8).is_err());
+
+    let mib = 1024 * 1024;
+    let gib = 1024 * mib;
+
+    // 32 GiB octree cache size sanity checking
+    let leafs = 32 * gib / 32;
+    let rows_to_discard = StoreConfig::default_rows_to_discard(leafs, 8);
+    let tree_size = get_merkle_tree_len(leafs, 8).expect("");
+    let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
+    assert_eq!(leafs, 1073741824);
+    assert_eq!(rows_to_discard, 3);
+    assert_eq!(tree_size, 1227133513);
+    assert_eq!(cache_size, 299593);
+
+    // 4 GiB octree cache size sanity checking
+    let leafs = 4 * gib / 32;
+    let rows_to_discard = StoreConfig::default_rows_to_discard(leafs, 8);
+    let tree_size = get_merkle_tree_len(leafs, 8).expect("");
+    let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
+    assert_eq!(leafs, 134217728);
+    assert_eq!(rows_to_discard, 3);
+    assert_eq!(tree_size, 153391689);
+    assert_eq!(cache_size, 37449);
+
+    // 512 MiB octree cache size sanity checking
+    let leafs = 512 * mib / 32;
+    let rows_to_discard = StoreConfig::default_rows_to_discard(leafs, 8);
+    let tree_size = get_merkle_tree_len(leafs, 8).expect("");
+    let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
+    assert_eq!(leafs, 16777216);
+    assert_eq!(rows_to_discard, 3);
+    assert_eq!(tree_size, 19173961);
+    assert_eq!(cache_size, 4681);
 }

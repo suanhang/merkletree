@@ -239,9 +239,9 @@ impl<E: Element> Store<E> for DiskStore<E> {
         let data_width = leafs * self.elem_len;
 
         // Calculate how large the cache should be (based on the
-        // config.levels param).
+        // config.rows_to_discard param).
         let cache_size =
-            get_merkle_tree_cache_size(leafs, branches, config.levels)? * self.elem_len;
+            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * self.elem_len;
 
         // The file cannot be compacted if the specified configuration
         // requires either 1) nothing to be cached, or 2) everything
