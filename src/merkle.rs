@@ -977,7 +977,7 @@ impl<
     fn gen_cached_top_tree_proof<Arity: Unsigned>(
         &self,
         i: usize,
-        rows_to_discard: usize,
+        rows_to_discard: Option<usize>,
     ) -> Result<Proof<E, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid top-tree arity");
         ensure!(
@@ -1025,7 +1025,7 @@ impl<
     fn gen_cached_sub_tree_proof<Arity: Unsigned>(
         &self,
         i: usize,
-        rows_to_discard: usize,
+        rows_to_discard: Option<usize>,
     ) -> Result<Proof<E, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid sub-tree arity");
         ensure!(
@@ -1070,13 +1070,17 @@ impl<
 
     /// Generate merkle tree inclusion proof for leaf `i` by first
     /// building a partial tree (returned) along with the proof.
+    /// 'rows_to_discard' is an option that will be used if set (even
+    /// if it may cause an error), otherwise a reasonable default is
+    /// chosen.
+    ///
     /// Return value is a Result tuple of the proof and the partial
     /// tree that was constructed.
     #[allow(clippy::type_complexity)]
     pub fn gen_cached_proof(
         &self,
         i: usize,
-        rows_to_discard: usize,
+        rows_to_discard: Option<usize>,
     ) -> Result<Proof<E, BaseTreeArity>> {
         match &self.data {
             Data::TopTree(_) => self.gen_cached_top_tree_proof::<TopTreeArity>(i, rows_to_discard),
@@ -1098,6 +1102,11 @@ impl<
 
                 let branches = BaseTreeArity::to_usize();
                 let total_size = get_merkle_tree_len(self.leafs, branches)?;
+                let rows_to_discard = if rows_to_discard.is_some() {
+                    rows_to_discard.unwrap()
+                } else {
+                    StoreConfig::default_rows_to_discard(self.leafs, branches)
+                };
                 let cache_size = get_merkle_tree_cache_size(self.leafs, branches, rows_to_discard)?;
                 ensure!(
                     cache_size < total_size,
@@ -1814,6 +1823,7 @@ pub fn get_merkle_tree_cache_size(
     let shift = log2_pow2(branches);
     let len = get_merkle_tree_len(leafs, branches)?;
     let mut height = get_merkle_tree_height(leafs, branches);
+
     ensure!(
         height - 1 > rows_to_discard,
         "Cannot discard all rows except for the base"

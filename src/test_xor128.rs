@@ -281,7 +281,7 @@ fn test_levelcache_v1_tree_from_iter<U: Unsigned>(
     for i in 0..num_challenges {
         let index = i * (leafs / num_challenges);
         let proof = mt_level_cache
-            .gen_cached_proof(index, config.rows_to_discard)
+            .gen_cached_proof(index, Some(config.rows_to_discard))
             .expect("Failed to generate proof and partial tree");
         assert!(proof.validate::<XOR128>().expect("failed to validate"));
     }
@@ -292,7 +292,7 @@ fn test_levelcache_direct_build_from_slice<U: Unsigned>(
     len: usize,
     height: usize,
     num_challenges: usize,
-    rows_to_discard: usize,
+    rows_to_discard: Option<usize>,
 ) {
     assert!(is_merkle_tree_size_valid(leafs, U::to_usize()));
 
@@ -301,6 +301,10 @@ fn test_levelcache_direct_build_from_slice<U: Unsigned>(
     let lc_name = format!("{}-{}-{}-{}", test_name, leafs, len, height);
     let temp_dir = tempdir::TempDir::new(&test_name).unwrap();
 
+    let rows_to_discard = match rows_to_discard {
+        Some(x) => x,
+        None => StoreConfig::default_rows_to_discard(leafs, U::to_usize()),
+    };
     // Construct and store an MT using a named DiskStore.
     let config = StoreConfig::new(temp_dir.path(), String::from(&replica), rows_to_discard);
     build_disk_tree_from_iter::<U>(leafs, len, height, &config);
@@ -317,7 +321,7 @@ fn test_levelcache_direct_build_from_slice<U: Unsigned>(
     for i in 0..num_challenges {
         let index = i * (leafs / num_challenges);
         let proof = lc_tree
-            .gen_cached_proof(index, rows_to_discard)
+            .gen_cached_proof(index, Some(rows_to_discard))
             .expect("Failed to generate proof and partial tree");
         assert!(proof.validate::<XOR128>().expect("failed to validate"));
     }
@@ -328,7 +332,7 @@ fn test_levelcache_direct_build_from_iter<U: Unsigned>(
     len: usize,
     height: usize,
     num_challenges: usize,
-    rows_to_discard: usize,
+    rows_to_discard: Option<usize>,
 ) {
     assert!(is_merkle_tree_size_valid(leafs, U::to_usize()));
 
@@ -337,6 +341,10 @@ fn test_levelcache_direct_build_from_iter<U: Unsigned>(
     let lc_name = format!("{}-{}-{}-{}", test_name, leafs, len, height);
     let temp_dir = tempdir::TempDir::new(&test_name).unwrap();
 
+    let rows_to_discard = match rows_to_discard {
+        Some(x) => x,
+        None => StoreConfig::default_rows_to_discard(leafs, U::to_usize()),
+    };
     // Construct and store an MT using a named DiskStore.
     let config = StoreConfig::new(temp_dir.path(), String::from(&replica), rows_to_discard);
     build_disk_tree_from_iter::<U>(leafs, len, height, &config);
@@ -352,7 +360,7 @@ fn test_levelcache_direct_build_from_iter<U: Unsigned>(
     for i in 0..num_challenges {
         let index = i * (leafs / num_challenges);
         let proof = lc_tree
-            .gen_cached_proof(index, rows_to_discard)
+            .gen_cached_proof(index, None)
             .expect("Failed to generate proof and partial tree");
         assert!(proof.validate::<XOR128>().expect("failed to validate"));
     }
@@ -360,23 +368,11 @@ fn test_levelcache_direct_build_from_iter<U: Unsigned>(
 
 #[test]
 fn test_levelcache_direct_build_quad() {
-    let (leafs, len, height, num_challenges, rows_to_discard) = { (1048576, 1398101, 11, 2048, 7) };
+    let (leafs, len, height, num_challenges) = { (1048576, 1398101, 11, 2048) };
 
-    test_levelcache_direct_build_from_iter::<U4>(
-        leafs,
-        len,
-        height,
-        num_challenges,
-        rows_to_discard,
-    );
+    test_levelcache_direct_build_from_iter::<U4>(leafs, len, height, num_challenges, None);
 
-    test_levelcache_direct_build_from_slice::<U4>(
-        leafs,
-        len,
-        height,
-        num_challenges,
-        rows_to_discard,
-    );
+    test_levelcache_direct_build_from_slice::<U4>(leafs, len, height, num_challenges, None);
 }
 
 #[test]
@@ -388,7 +384,7 @@ fn test_levelcache_direct_build_octo() {
         len,
         height,
         num_challenges,
-        rows_to_discard,
+        Some(rows_to_discard),
     );
 
     test_levelcache_direct_build_from_slice::<U8>(
@@ -396,7 +392,7 @@ fn test_levelcache_direct_build_octo() {
         len,
         height,
         num_challenges,
-        rows_to_discard,
+        Some(rows_to_discard),
     );
 }
 
@@ -530,7 +526,6 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
 
     let test_name = "test_compound_levelcache_tree_from_store_configs";
     let temp_dir = tempdir::TempDir::new("test_compound_levelcache_tree").unwrap();
-    let levels = StoreConfig::default_rows_to_discard(sub_tree_leafs, branches);
     let len = get_merkle_tree_len(sub_tree_leafs, branches).expect("failed to get merkle len");
     let height = get_merkle_tree_height(sub_tree_leafs, branches);
 
@@ -553,7 +548,11 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
             "{}-{}-{}-{}-replica-{}",
             test_name, sub_tree_leafs, len, height, i
         );
-        let config = StoreConfig::new(temp_dir.path(), String::from(&replica), levels);
+        let config = StoreConfig::new(
+            temp_dir.path(),
+            String::from(&replica),
+            StoreConfig::default_rows_to_discard(sub_tree_leafs, branches),
+        );
         build_disk_tree_from_iter::<B>(sub_tree_leafs, len, height, &config);
         let store = DiskStore::new_with_config(len, branches, config.clone())
             .expect("failed to open store");
@@ -596,7 +595,7 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
         let _ = tree.read_at(i).expect("Failed to read tree element");
 
         // Make sure all proofs validate.
-        let p = tree.gen_cached_proof(i, levels).unwrap();
+        let p = tree.gen_cached_proof(i, None).unwrap();
         assert!(p.validate::<XOR128>().expect("failed to validate"));
     }
 }
@@ -1241,7 +1240,7 @@ fn test_level_cache_tree_v2() {
     // Generate proofs on tree.
     for j in 0..mt_level_cache.leafs() {
         let proof = mt_level_cache
-            .gen_cached_proof(j, config.rows_to_discard)
+            .gen_cached_proof(j, None)
             .expect("Failed to generate proof and partial tree");
         assert!(proof.validate::<XOR128>().expect("failed to validate"));
     }
@@ -1391,7 +1390,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
             // recorded LevelCacheStore.
             for j in 0..mt_level_cache.leafs() {
                 let proof = mt_level_cache
-                    .gen_cached_proof(j, i)
+                    .gen_cached_proof(j, Some(i))
                     .expect("Failed to generate proof and partial tree");
                 assert!(proof.validate::<XOR128>().expect("failed to validate"));
             }
