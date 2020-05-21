@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use typenum::marker_traits::Unsigned;
 
 use crate::hash::Algorithm;
-use crate::merkle::{get_merkle_tree_height, log2_pow2, next_pow2, Element};
+use crate::merkle::{get_merkle_tree_row_count, log2_pow2, next_pow2, Element};
 
 /// Tree size (number of nodes) used as threshold to decide which build algorithm
 /// to use. Small trees (below this value) use the old build algorithm, optimized
@@ -144,24 +144,23 @@ impl StoreConfig {
         }
     }
 
-    // If the tree is large enough to use the default, use it.  If
-    // it's too small to cache anything, don't cache anything.
-    // Otherwise, the tree is 'small' so a fixed value of height - 2
-    // rows_to_discard should be sufficient.
+    // If the tree is large enough to use the default value
+    // (per-arity), use it.  If it's too small to cache anything
+    // (i.e. not enough rows), don't discard any.
     pub fn default_rows_to_discard(leafs: usize, branches: usize) -> usize {
-        let height = get_merkle_tree_height(leafs, branches);
-        if height <= 2 {
+        let row_count = get_merkle_tree_row_count(leafs, branches);
+        if row_count <= 2 {
             // If a tree only has a root row and/or base, there is
             // nothing to discard.
             return 0;
-        } else if height == 3 {
+        } else if row_count == 3 {
             // If a tree only has 1 row between the base and root,
             // it's all that can be discarded.
             return 1;
         }
 
-        // height - 2 discounts the base layer (1) and root (1)
-        let max_rows_to_discard = height - 2;
+        // row_count - 2 discounts the base layer (1) and root (1)
+        let max_rows_to_discard = row_count - 2;
 
         // Discard at most 'constant value' rows (coded below,
         // differing by arity) while respecting the max number that
@@ -261,7 +260,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
     fn build_small_tree<A: Algorithm<E>, U: Unsigned>(
         &mut self,
         leafs: usize,
-        height: usize,
+        row_count: usize,
     ) -> Result<E> {
         ensure!(leafs % 2 == 0, "Leafs must be a power of two");
 
@@ -299,8 +298,8 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
             width >>= shift; // width /= branches;
         }
 
-        ensure!(height == level + 1, "Invalid tree height");
-        // The root isn't part of the previous loop so `height` is
+        ensure!(row_count == level + 1, "Invalid tree row_count");
+        // The root isn't part of the previous loop so `row_count` is
         // missing one level.
 
         self.last()
@@ -369,7 +368,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
     fn build<A: Algorithm<E>, U: Unsigned>(
         &mut self,
         leafs: usize,
-        height: usize,
+        row_count: usize,
         _config: Option<StoreConfig>,
     ) -> Result<E> {
         let branches = U::to_usize();
@@ -381,7 +380,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
         ensure!(leafs % 2 == 0, "Leafs must be a power of two");
 
         if leafs <= SMALL_TREE_BUILD {
-            return self.build_small_tree::<A, U>(leafs, height);
+            return self.build_small_tree::<A, U>(leafs, row_count);
         }
 
         let shift = log2_pow2(branches);
@@ -413,8 +412,8 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
             width >>= shift; // width /= branches;
         }
 
-        ensure!(height == level + 1, "Invalid tree height");
-        // The root isn't part of the previous loop so `height` is
+        ensure!(row_count == level + 1, "Invalid tree row_count");
+        // The root isn't part of the previous loop so `row_count` is
         // missing one level.
 
         // Return the root

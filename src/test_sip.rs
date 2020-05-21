@@ -110,7 +110,7 @@ fn test_simple_tree() {
         .unwrap();
 
         assert_eq!(mt.leafs(), *items);
-        assert_eq!(mt.height(), log2_pow2(next_pow2(mt.len())));
+        assert_eq!(mt.row_count(), log2_pow2(next_pow2(mt.len())));
         assert_eq!(
             mt.read_range(0, mt.len()).unwrap(),
             answer[*items - 2].as_slice()

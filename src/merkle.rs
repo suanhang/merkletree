@@ -147,7 +147,15 @@ where
     data: Data<E, A, S, BaseTreeArity, SubTreeArity>,
     leafs: usize,
     len: usize,
-    height: usize,
+
+    // Note: The former 'upstream' merkle_light project uses 'height'
+    // (with regards to the tree property) incorrectly, so we've
+    // renamed it since it's actually a 'row_count'.  For example, a
+    // tree with 2 leaf nodes and a single root node has a height of
+    // 1, but a row_count of 2.
+    //
+    // Internally, this code considers only the row_count.
+    row_count: usize,
 
     // Cache with the `root` of the tree built from `data`. This allows to
     // not access the `Store` (e.g., access to disks in `DiskStore`).
@@ -174,7 +182,7 @@ impl<
             .field("data", &self.data)
             .field("leafs", &self.leafs)
             .field("len", &self.len)
-            .field("height", &self.height)
+            .field("row_count", &self.row_count)
             .field("root", &self.root)
             .finish()
     }
@@ -394,14 +402,14 @@ impl<
             "MerkleTree size is invalid given the arity"
         );
 
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
         let root = data.read_at(data.len() - 1)?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs,
             len: tree_len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -426,7 +434,7 @@ impl<
         );
 
         let branches = BaseTreeArity::to_usize();
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
         let tree_len = get_merkle_tree_len(leafs, branches)?;
         ensure!(
             tree_len == data.len() / E::byte_len(),
@@ -445,7 +453,7 @@ impl<
             data: Data::BaseTree(store),
             leafs,
             len: tree_len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -471,7 +479,7 @@ impl<
         );
 
         let branches = BaseTreeArity::to_usize();
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
         let tree_len = get_merkle_tree_len(leafs, branches)?;
         ensure!(
             tree_len == data.len() / E::byte_len(),
@@ -491,7 +499,7 @@ impl<
             data: Data::BaseTree(store),
             leafs,
             len: tree_len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -513,8 +521,10 @@ impl<
             "Cannot use from_trees if not constructing a structure with sub-trees"
         );
         ensure!(
-            trees.iter().all(|ref mt| mt.height() == trees[0].height()),
-            "All passed in trees must have the same height"
+            trees
+                .iter()
+                .all(|ref mt| mt.row_count() == trees[0].row_count()),
+            "All passed in trees must have the same row_count"
         );
         ensure!(
             trees.iter().all(|ref mt| mt.len() == trees[0].len()),
@@ -529,11 +539,11 @@ impl<
 
         // If we are building a compound tree with no sub-trees,
         // all properties revert to the single tree properties.
-        let (leafs, len, height, root) = if sub_tree_layer_nodes == 0 {
+        let (leafs, len, row_count, root) = if sub_tree_layer_nodes == 0 {
             (
                 trees[0].leafs(),
                 trees[0].len(),
-                trees[0].height(),
+                trees[0].row_count(),
                 trees[0].root(),
             )
         } else {
@@ -541,20 +551,20 @@ impl<
             let leafs = trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
             // Total length of the compound tree is the combined length of all subtrees plus the root.
             let len = trees.iter().fold(0, |len, mt| len + mt.len()) + 1;
-            // Total height of the compound tree is the height of any of the sub-trees to top-layer plus root.
-            let height = trees[0].height() + 1;
+            // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
+            let row_count = trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
             let roots: Vec<E> = trees.iter().map(|x| x.root()).collect();
             let root = A::default().multi_node(&roots, 1);
 
-            (leafs, len, height, root)
+            (leafs, len, row_count, root)
         };
 
         Ok(MerkleTree {
             data: Data::SubTree(trees),
             leafs,
             len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -576,8 +586,10 @@ impl<
             "Cannot use from_sub_trees if not constructing a structure with sub-trees"
         );
         ensure!(
-            trees.iter().all(|ref mt| mt.height() == trees[0].height()),
-            "All passed in trees must have the same height"
+            trees
+                .iter()
+                .all(|ref mt| mt.row_count() == trees[0].row_count()),
+            "All passed in trees must have the same row_count"
         );
         ensure!(
             trees.iter().all(|ref mt| mt.len() == trees[0].len()),
@@ -592,25 +604,25 @@ impl<
 
         // If we are building a compound tree with no sub-trees,
         // all properties revert to the single tree properties.
-        let (leafs, len, height, root) = {
+        let (leafs, len, row_count, root) = {
             // Total number of leafs in the compound tree is the combined leafs total of all subtrees.
             let leafs = trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
             // Total length of the compound tree is the combined length of all subtrees plus the root.
             let len = trees.iter().fold(0, |len, mt| len + mt.len()) + 1;
-            // Total height of the compound tree is the height of any of the sub-trees to top-layer plus root.
-            let height = trees[0].height() + 1;
+            // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
+            let row_count = trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
             let roots: Vec<E> = trees.iter().map(|x| x.root()).collect();
             let root = A::default().multi_node(&roots, 1);
 
-            (leafs, len, height, root)
+            (leafs, len, row_count, root)
         };
 
         Ok(MerkleTree {
             data: Data::TopTree(trees),
             leafs,
             len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -633,8 +645,10 @@ impl<
             "Cannot use from_sub_trees if not constructing a structure with sub-trees"
         );
         ensure!(
-            trees.iter().all(|ref mt| mt.height() == trees[0].height()),
-            "All passed in trees must have the same height"
+            trees
+                .iter()
+                .all(|ref mt| mt.row_count() == trees[0].row_count()),
+            "All passed in trees must have the same row_count"
         );
         ensure!(
             trees.iter().all(|ref mt| mt.len() == trees[0].len()),
@@ -661,25 +675,25 @@ impl<
             sub_trees.push(MerkleTree::from_trees(group)?);
         }
 
-        let (leafs, len, height, root) = {
+        let (leafs, len, row_count, root) = {
             // Total number of leafs in the compound tree is the combined leafs total of all subtrees.
             let leafs = sub_trees.iter().fold(0, |leafs, mt| leafs + mt.leafs());
             // Total length of the compound tree is the combined length of all subtrees plus the root.
             let len = sub_trees.iter().fold(0, |len, mt| len + mt.len()) + 1;
-            // Total height of the compound tree is the height of any of the sub-trees to top-layer plus root.
-            let height = sub_trees[0].height() + 1;
+            // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
+            let row_count = sub_trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
             let roots: Vec<E> = sub_trees.iter().map(|x| x.root()).collect();
             let root = A::default().multi_node(&roots, 1);
 
-            (leafs, len, height, root)
+            (leafs, len, row_count, root)
         };
 
         Ok(MerkleTree {
             data: Data::TopTree(sub_trees),
             leafs,
             len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -810,9 +824,9 @@ impl<
     fn build_partial_tree(
         mut data: VecStore<E>,
         leafs: usize,
-        height: usize,
+        row_count: usize,
     ) -> Result<MerkleTree<E, A, VecStore<E>, BaseTreeArity>> {
-        let root = VecStore::build::<A, BaseTreeArity>(&mut data, leafs, height, None)?;
+        let root = VecStore::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
         let branches = BaseTreeArity::to_usize();
 
         let tree_len = get_merkle_tree_len(leafs, branches)?;
@@ -827,7 +841,7 @@ impl<
             data: Data::BaseTree(data),
             leafs,
             len: tree_len,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -927,8 +941,8 @@ impl<
                 let shift = log2_pow2(branches);
 
                 let mut lemma: Vec<E> =
-                    Vec::with_capacity(get_merkle_proof_lemma_len(self.height, branches));
-                let mut path: Vec<usize> = Vec::with_capacity(self.height - 1); // path - 1
+                    Vec::with_capacity(get_merkle_proof_lemma_len(self.row_count, branches));
+                let mut path: Vec<usize> = Vec::with_capacity(self.row_count - 1); // path - 1
 
                 // item is first
                 ensure!(
@@ -960,12 +974,15 @@ impl<
                 lemma.push(self.root());
 
                 // Sanity check: if the `MerkleTree` lost its integrity and `data` doesn't match the
-                // expected values for `leafs` and `height` this can get ugly.
+                // expected values for `leafs` and `row_count` this can get ugly.
                 ensure!(
-                    lemma.len() == get_merkle_proof_lemma_len(self.height, branches),
+                    lemma.len() == get_merkle_proof_lemma_len(self.row_count, branches),
                     "Invalid proof lemma length"
                 );
-                ensure!(path.len() == self.height - 1, "Invalid proof path length");
+                ensure!(
+                    path.len() == self.row_count - 1,
+                    "Invalid proof path length"
+                );
 
                 Proof::new::<U0, U0>(None, lemma, path)
             }
@@ -1102,8 +1119,8 @@ impl<
 
                 let branches = BaseTreeArity::to_usize();
                 let total_size = get_merkle_tree_len(self.leafs, branches)?;
-                let rows_to_discard = if rows_to_discard.is_some() {
-                    rows_to_discard.unwrap()
+                let rows_to_discard = if let Some(rows) = rows_to_discard {
+                    rows
                 } else {
                     StoreConfig::default_rows_to_discard(self.leafs, branches)
                 };
@@ -1119,8 +1136,8 @@ impl<
                     "The size of the cached leafs must be a power of 2"
                 );
 
-                let cache_height = get_merkle_tree_height(cached_leafs, branches);
-                let partial_height = self.height - cache_height + 1;
+                let cache_row_count = get_merkle_tree_row_count(cached_leafs, branches);
+                let partial_row_count = self.row_count - cache_row_count + 1;
 
                 // Calculate the subset of the base layer data width that we
                 // need in order to build the partial tree required to build
@@ -1130,9 +1147,9 @@ impl<
                 let segment_start = (i / segment_width) * segment_width;
                 let segment_end = segment_start + segment_width;
 
-                debug!("leafs {}, branches {}, total size {}, total height {}, cache_size {}, rows_to_discard {}, \
-                        partial_height {}, cached_leafs {}, segment_width {}, segment range {}-{} for {}",
-                       self.leafs, branches, total_size, self.height, cache_size, rows_to_discard, partial_height,
+                debug!("leafs {}, branches {}, total size {}, total row_count {}, cache_size {}, rows_to_discard {}, \
+                        partial_row_count {}, cached_leafs {}, segment_width {}, segment range {}-{} for {}",
+                       self.leafs, branches, total_size, self.row_count, cache_size, rows_to_discard, partial_row_count,
                        cached_leafs, segment_width, segment_start, segment_end, i);
 
                 // Copy the proper segment of the base data into memory and
@@ -1160,10 +1177,10 @@ impl<
 
                 // Build the optimally small tree.
                 let partial_tree: MerkleTree<E, A, VecStore<E>, BaseTreeArity> =
-                    Self::build_partial_tree(partial_store, segment_width, partial_height)?;
+                    Self::build_partial_tree(partial_store, segment_width, partial_row_count)?;
                 ensure!(
-                    partial_height == partial_tree.height(),
-                    "Inconsistent partial tree height"
+                    partial_row_count == partial_tree.row_count(),
+                    "Inconsistent partial tree row_count"
                 );
 
                 // Generate entire proof with access to the base data, the
@@ -1171,8 +1188,8 @@ impl<
                 let proof = self.gen_proof_with_partial_tree(i, rows_to_discard, &partial_tree)?;
 
                 debug!(
-                    "generated partial_tree of height {} and len {} with {} branches for proof at {}",
-                    partial_tree.height,
+                    "generated partial_tree of row_count {} and len {} with {} branches for proof at {}",
+                    partial_tree.row_count,
                     partial_tree.len(),
                     branches,
                     i
@@ -1234,7 +1251,7 @@ impl<
         // partial tree as we move up it.
         //
         // segment_shift is conceptually (segment_start >>
-        // (current_height * shift)), which tracks an offset in the
+        // (current_row_count * shift)), which tracks an offset in the
         // main merkle tree that we apply to the partial tree.
         let mut segment_shift = segment_start;
 
@@ -1252,8 +1269,8 @@ impl<
         let mut partial_base = 0;
 
         let mut lemma: Vec<E> =
-            Vec::with_capacity(get_merkle_proof_lemma_len(self.height, branches));
-        let mut path: Vec<usize> = Vec::with_capacity(self.height - 1); // path - 1
+            Vec::with_capacity(get_merkle_proof_lemma_len(self.row_count, branches));
+        let mut path: Vec<usize> = Vec::with_capacity(self.row_count - 1); // path - 1
 
         ensure!(
             SubTreeArity::to_usize() == 0,
@@ -1298,12 +1315,15 @@ impl<
         lemma.push(self.root());
 
         // Sanity check: if the `MerkleTree` lost its integrity and `data` doesn't match the
-        // expected values for `leafs` and `height` this can get ugly.
+        // expected values for `leafs` and `row_count` this can get ugly.
         ensure!(
-            lemma.len() == get_merkle_proof_lemma_len(self.height, branches),
+            lemma.len() == get_merkle_proof_lemma_len(self.row_count, branches),
             "Invalid proof lemma length"
         );
-        ensure!(path.len() == self.height - 1, "Invalid proof path length");
+        ensure!(
+            path.len() == self.row_count - 1,
+            "Invalid proof path length"
+        );
 
         Proof::new::<U0, U0>(None, lemma, path)
     }
@@ -1360,10 +1380,10 @@ impl<
         }
     }
 
-    /// Returns height of the tree
+    /// Returns row_count of the tree
     #[inline]
-    pub fn height(&self) -> usize {
-        self.height
+    pub fn row_count(&self) -> usize {
+        self.row_count
     }
 
     /// Returns original number of elements the tree was built upon.
@@ -1466,17 +1486,17 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs_count, branches)?;
-        let height = get_merkle_tree_height(leafs_count, branches);
+        let row_count = get_merkle_tree_row_count(leafs_count, branches);
 
         let mut data = S::new_from_slice_with_config(size, branches, leafs, config.clone())
             .context("failed to create data store")?;
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, height, Some(config))?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, row_count, Some(config))?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs: leafs_count,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1508,17 +1528,17 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs_count, branches)?;
-        let height = get_merkle_tree_height(leafs_count, branches);
+        let row_count = get_merkle_tree_row_count(leafs_count, branches);
 
         let mut data = S::new_from_slice(size, leafs).context("failed to create data store")?;
 
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, height, None)?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, row_count, None)?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs: leafs_count,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1574,18 +1594,18 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs, branches)?;
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
 
         let mut data = S::new(size).expect("failed to create data store");
 
         populate_data_par::<E, A, S, BaseTreeArity, _>(&mut data, iter)?;
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, height, None)?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1614,7 +1634,7 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs, branches)?;
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
 
         let mut data = S::new_with_config(size, branches, config.clone())
             .context("failed to create data store")?;
@@ -1628,7 +1648,7 @@ impl<
                 data: Data::BaseTree(data),
                 leafs,
                 len: size,
-                height,
+                row_count,
                 root,
                 _a: PhantomData,
                 _e: PhantomData,
@@ -1639,13 +1659,13 @@ impl<
         }
 
         populate_data_par::<E, A, S, BaseTreeArity, _>(&mut data, iter)?;
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, height, Some(config))?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, Some(config))?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1682,18 +1702,18 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs, branches)?;
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
 
         let mut data = S::new(size).context("failed to create data store")?;
         populate_data::<E, A, S, BaseTreeArity, I>(&mut data, iter)
             .context("failed to populate data")?;
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, height, None)?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1723,7 +1743,7 @@ impl<
         );
 
         let size = get_merkle_tree_len(leafs, branches)?;
-        let height = get_merkle_tree_height(leafs, branches);
+        let row_count = get_merkle_tree_row_count(leafs, branches);
 
         let mut data = S::new_with_config(size, branches, config.clone())
             .context("failed to create data store")?;
@@ -1737,7 +1757,7 @@ impl<
                 data: Data::BaseTree(data),
                 leafs,
                 len: size,
-                height,
+                row_count,
                 root,
                 _a: PhantomData,
                 _e: PhantomData,
@@ -1749,13 +1769,13 @@ impl<
 
         populate_data::<E, A, S, BaseTreeArity, I>(&mut data, iter)
             .expect("failed to populate data");
-        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, height, Some(config))?;
+        let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, Some(config))?;
 
         Ok(MerkleTree {
             data: Data::BaseTree(data),
             leafs,
             len: size,
-            height,
+            row_count,
             root,
             _a: PhantomData,
             _e: PhantomData,
@@ -1822,24 +1842,24 @@ pub fn get_merkle_tree_cache_size(
 ) -> Result<usize> {
     let shift = log2_pow2(branches);
     let len = get_merkle_tree_len(leafs, branches)?;
-    let mut height = get_merkle_tree_height(leafs, branches);
+    let mut row_count = get_merkle_tree_row_count(leafs, branches);
 
     ensure!(
-        height - 1 > rows_to_discard,
+        row_count - 1 > rows_to_discard,
         "Cannot discard all rows except for the base"
     );
 
-    // 'height - 1' means that we start discarding rows above the base
-    // layer, which is included in the current height.
-    let cache_base = height - 1 - rows_to_discard;
+    // 'row_count - 1' means that we start discarding rows above the base
+    // layer, which is included in the current row_count.
+    let cache_base = row_count - 1 - rows_to_discard;
 
     let mut cache_size = len;
     let mut cur_leafs = leafs;
 
-    while height > cache_base {
+    while row_count > cache_base {
         cache_size -= cur_leafs;
         cur_leafs >>= shift; // cur /= branches
-        height -= 1;
+        row_count -= 1;
     }
 
     Ok(cache_size)
@@ -1862,8 +1882,8 @@ pub fn is_merkle_tree_size_valid(leafs: usize, branches: usize) -> bool {
     true
 }
 
-// Height calculation given the number of leafs in the tree and the branches.
-pub fn get_merkle_tree_height(leafs: usize, branches: usize) -> usize {
+// Row_Count calculation given the number of leafs in the tree and the branches.
+pub fn get_merkle_tree_row_count(leafs: usize, branches: usize) -> usize {
     // Optimization
     if branches == 2 {
         (leafs * branches).trailing_zeros() as usize
@@ -1872,10 +1892,10 @@ pub fn get_merkle_tree_height(leafs: usize, branches: usize) -> usize {
     }
 }
 
-// Given a tree of 'height' with the specified number of 'branches',
+// Given a tree of 'row_count' with the specified number of 'branches',
 // calculate the length of hashes required for the proof.
-pub fn get_merkle_proof_lemma_len(height: usize, branches: usize) -> usize {
-    2 + ((branches - 1) * (height - 1))
+pub fn get_merkle_proof_lemma_len(row_count: usize, branches: usize) -> usize {
+    2 + ((branches - 1) * (row_count - 1))
 }
 
 // This method returns the number of 'leafs' given a merkle tree

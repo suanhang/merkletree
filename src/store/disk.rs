@@ -398,7 +398,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     fn build<A: Algorithm<E>, U: Unsigned>(
         &mut self,
         leafs: usize,
-        height: usize,
+        row_count: usize,
         _config: Option<StoreConfig>,
     ) -> Result<E> {
         let branches = U::to_usize();
@@ -449,8 +449,8 @@ impl<E: Element> Store<E> for DiskStore<E> {
             "Invalid merkle tree length"
         );
 
-        ensure!(height == level + 1, "Invalid tree height");
-        // The root isn't part of the previous loop so `height` is
+        ensure!(row_count == level + 1, "Invalid tree row_count");
+        // The root isn't part of the previous loop so `row_count` is
         // missing one level.
 
         // Return the root
