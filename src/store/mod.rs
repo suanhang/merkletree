@@ -161,14 +161,15 @@ impl StoreConfig {
         }
 
         // height - 2 discounts the base layer (1) and root (1)
-        let min_rows_to_discard = height - 2;
+        let max_rows_to_discard = height - 2;
 
-        // Discard as many rows as we can (up to the constant values),
-        // but respect the minimum number that the tree can support.
+        // Discard at most 'constant value' rows (coded below,
+        // differing by arity) while respecting the max number that
+        // the tree can support discarding.
         match branches {
-            2 => std::cmp::min(min_rows_to_discard, 7),
-            4 => std::cmp::min(min_rows_to_discard, 5),
-            _ => std::cmp::min(min_rows_to_discard, 3),
+            2 => std::cmp::min(max_rows_to_discard, 7),
+            4 => std::cmp::min(max_rows_to_discard, 5),
+            _ => std::cmp::min(max_rows_to_discard, 3),
         }
     }
 
