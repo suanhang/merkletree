@@ -239,9 +239,9 @@ impl<E: Element> Store<E> for DiskStore<E> {
         let data_width = leafs * self.elem_len;
 
         // Calculate how large the cache should be (based on the
-        // config.levels param).
+        // config.rows_to_discard param).
         let cache_size =
-            get_merkle_tree_cache_size(leafs, branches, config.levels)? * self.elem_len;
+            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * self.elem_len;
 
         // The file cannot be compacted if the specified configuration
         // requires either 1) nothing to be cached, or 2) everything
@@ -398,7 +398,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     fn build<A: Algorithm<E>, U: Unsigned>(
         &mut self,
         leafs: usize,
-        height: usize,
+        row_count: usize,
         _config: Option<StoreConfig>,
     ) -> Result<E> {
         let branches = U::to_usize();
@@ -449,8 +449,8 @@ impl<E: Element> Store<E> for DiskStore<E> {
             "Invalid merkle tree length"
         );
 
-        ensure!(height == level + 1, "Invalid tree height");
-        // The root isn't part of the previous loop so `height` is
+        ensure!(row_count == level + 1, "Invalid tree row_count");
+        // The root isn't part of the previous loop so `row_count` is
         // missing one level.
 
         // Return the root
