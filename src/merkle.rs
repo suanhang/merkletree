@@ -1119,8 +1119,15 @@ impl<
 
                 let branches = BaseTreeArity::to_usize();
                 let total_size = get_merkle_tree_len(self.leafs, branches)?;
+                // If rows to discard is specified and we *know* it's a value that will cause an error
+                // (i.e. there are not enough rows to discard, we use a sane default instead).  This
+                // primarily affects tests because it only affects 'small' trees, entirely outside the
+                // scope of any 'production' tree width.
                 let rows_to_discard = if let Some(rows) = rows_to_discard {
-                    rows
+                    std::cmp::min(
+                        rows,
+                        StoreConfig::default_rows_to_discard(self.leafs, branches),
+                    )
                 } else {
                     StoreConfig::default_rows_to_discard(self.leafs, branches)
                 };
@@ -2062,9 +2069,12 @@ fn test_get_merkle_tree_methods() {
     let tree_size = get_merkle_tree_len(leafs, 8).expect("");
     let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
     assert_eq!(leafs, 1073741824);
-    assert_eq!(rows_to_discard, 3);
     assert_eq!(tree_size, 1227133513);
-    assert_eq!(cache_size, 299593);
+    assert_eq!(rows_to_discard, 2);
+    assert_eq!(cache_size, 2396745);
+    // Note: Values for when the default was 3
+    //assert_eq!(rows_to_discard, 3);
+    //assert_eq!(cache_size, 299593);
 
     // 4 GiB octree cache size sanity checking
     let leafs = 4 * gib / 32;
@@ -2072,9 +2082,12 @@ fn test_get_merkle_tree_methods() {
     let tree_size = get_merkle_tree_len(leafs, 8).expect("");
     let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
     assert_eq!(leafs, 134217728);
-    assert_eq!(rows_to_discard, 3);
     assert_eq!(tree_size, 153391689);
-    assert_eq!(cache_size, 37449);
+    assert_eq!(rows_to_discard, 2);
+    assert_eq!(cache_size, 299593);
+    // Note: Values for when the default was 3
+    //assert_eq!(rows_to_discard, 3);
+    //assert_eq!(cache_size, 37449);
 
     // 512 MiB octree cache size sanity checking
     let leafs = 512 * mib / 32;
@@ -2082,7 +2095,10 @@ fn test_get_merkle_tree_methods() {
     let tree_size = get_merkle_tree_len(leafs, 8).expect("");
     let cache_size = get_merkle_tree_cache_size(leafs, 8, rows_to_discard).expect("");
     assert_eq!(leafs, 16777216);
-    assert_eq!(rows_to_discard, 3);
     assert_eq!(tree_size, 19173961);
-    assert_eq!(cache_size, 4681);
+    assert_eq!(rows_to_discard, 2);
+    assert_eq!(cache_size, 37449);
+    // Note: Values for when the default was 3
+    //assert_eq!(rows_to_discard, 3);
+    //assert_eq!(cache_size, 4681);
 }
