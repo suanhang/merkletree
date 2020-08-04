@@ -867,25 +867,7 @@ impl<
         let tree_index = i / (self.leafs / arity);
 
         // Generate the sub tree proof at this tree level.
-        let sub_tree_proof = if top_layer {
-            ensure!(self.data.sub_trees().is_some(), "sub trees required");
-            let sub_trees = self.data.sub_trees().unwrap();
-            ensure!(arity == sub_trees.len(), "Top layer tree shape mis-match");
-
-            let tree = &sub_trees[tree_index];
-            let leaf_index = i % tree.leafs();
-
-            tree.gen_proof(leaf_index)
-        } else {
-            ensure!(self.data.base_trees().is_some(), "base trees required");
-            let base_trees = self.data.base_trees().unwrap();
-            ensure!(arity == base_trees.len(), "Sub tree layer shape mis-match");
-
-            let tree = &base_trees[tree_index];
-            let leaf_index = i % tree.leafs();
-
-            tree.gen_proof(leaf_index)
-        }?;
+        let sub_tree_proof = self.gen_base_proof(i)?;
 
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
@@ -913,8 +895,45 @@ impl<
         Proof::new::<TopTreeArity, SubTreeArity>(Some(Box::new(sub_tree_proof)), lemma, path)
     }
 
+    /// Generate merkle tree inclusion proof for leaf `i`, but only on the base tree.
+    pub fn gen_base_proof(&self, i: usize) -> Result<Proof<E, BaseTreeArity>> {
+        match &self.data {
+            Data::BaseTree(_) => self.gen_proof(i),
+            Data::TopTree(_) => {
+                let arity = TopTreeArity::to_usize();
+                // Locate the sub-tree the leaf is contained in.
+                let tree_index = i / (self.leafs / arity);
+
+                ensure!(self.data.sub_trees().is_some(), "sub trees required");
+                let sub_trees = self.data.sub_trees().unwrap();
+                ensure!(arity == sub_trees.len(), "Top layer tree shape mis-match");
+
+                let tree = &sub_trees[tree_index];
+                let leaf_index = i % tree.leafs();
+
+                tree.gen_proof(leaf_index)
+            }
+            Data::SubTree(_) => {
+                let arity = SubTreeArity::to_usize();
+                // Locate the sub-tree the leaf is contained in.
+                let tree_index = i / (self.leafs / arity);
+
+                ensure!(self.data.base_trees().is_some(), "base trees required");
+                let base_trees = self.data.base_trees().unwrap();
+                ensure!(
+                    arity == base_trees.len(),
+                    "Sub tree layer tree shape mis-match"
+                );
+
+                let tree = &base_trees[tree_index];
+                let leaf_index = i % tree.leafs();
+
+                tree.gen_proof(leaf_index)
+            }
+        }
+    }
+
     /// Generate merkle tree inclusion proof for leaf `i`
-    #[inline]
     pub fn gen_proof(&self, i: usize) -> Result<Proof<E, BaseTreeArity>> {
         match &self.data {
             Data::TopTree(_) => self.gen_sub_tree_proof(i, true, TopTreeArity::to_usize()),
