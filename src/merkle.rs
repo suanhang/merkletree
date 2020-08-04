@@ -867,7 +867,25 @@ impl<
         let tree_index = i / (self.leafs / arity);
 
         // Generate the sub tree proof at this tree level.
-        let sub_tree_proof = self.gen_base_proof(i)?;
+        let sub_tree_proof = if top_layer {
+            ensure!(self.data.sub_trees().is_some(), "sub trees required");
+            let sub_trees = self.data.sub_trees().unwrap();
+            ensure!(arity == sub_trees.len(), "Top layer tree shape mis-match");
+
+            let tree = &sub_trees[tree_index];
+            let leaf_index = i % tree.leafs();
+
+            tree.gen_proof(leaf_index)
+        } else {
+            ensure!(self.data.base_trees().is_some(), "base trees required");
+            let base_trees = self.data.base_trees().unwrap();
+            ensure!(arity == base_trees.len(), "Sub tree layer shape mis-match");
+
+            let tree = &base_trees[tree_index];
+            let leaf_index = i % tree.leafs();
+
+            tree.gen_proof(leaf_index)
+        }?;
 
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
@@ -911,7 +929,7 @@ impl<
                 let tree = &sub_trees[tree_index];
                 let leaf_index = i % tree.leafs();
 
-                tree.gen_proof(leaf_index)
+                tree.gen_base_proof(leaf_index)
             }
             Data::SubTree(_) => {
                 let arity = SubTreeArity::to_usize();
@@ -928,7 +946,7 @@ impl<
                 let tree = &base_trees[tree_index];
                 let leaf_index = i % tree.leafs();
 
-                tree.gen_proof(leaf_index)
+                tree.gen_base_proof(leaf_index)
             }
         }
     }
@@ -1132,7 +1150,7 @@ impl<
 
                 // Generate the proof that will validate to the provided
                 // sub-tree root (note the branching factor of B).
-                tree.gen_cached_proof(leaf_index, rows_to_discard)
+                tree.gen_cached_base_proof(leaf_index, rows_to_discard)
             }
             Data::SubTree(_) => {
                 let arity = SubTreeArity::to_usize();
@@ -1156,7 +1174,7 @@ impl<
 
                 // Generate the proof that will validate to the provided
                 // sub-tree root (note the branching factor of B).
-                tree.gen_cached_proof(leaf_index, rows_to_discard)
+                tree.gen_cached_base_proof(leaf_index, rows_to_discard)
             }
             Data::BaseTree(_) => self.gen_cached_proof(i, rows_to_discard),
         }
