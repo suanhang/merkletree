@@ -323,18 +323,18 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
         // optimized for big sector sizes (small ones will just have one thread doing all
         // the work).
         ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
-        Vec::from_iter((dbg!(read_start)..read_start + dbg!(width)).step_by(BUILD_CHUNK_NODES))
+        Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
             .par_iter()
             .try_for_each(|&chunk_index| -> Result<()> {
                 let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                 let chunk_nodes = {
-                    let mut chunked_nodes = vec![0u8; chunk_size * dbg!(N::to_usize())];
+                    let mut chunked_nodes = vec![0u8; chunk_size * N::to_usize()];
                     // Read everything taking the lock once.
                     data_lock
                         .read()
                         .unwrap()
-                        .read_range_into(dbg!(chunk_index), chunk_index + dbg!(chunk_size), &mut chunked_nodes)?;
+                        .read_range_into(chunk_index, chunk_index + chunk_size, &mut chunked_nodes)?;
                     chunked_nodes
                 };
 

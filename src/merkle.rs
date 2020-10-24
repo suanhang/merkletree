@@ -800,7 +800,7 @@ impl<
         leafs: usize,
         row_count: usize,
     ) -> Result<MerkleTree<A, VecStore<A::OutputSize>, BaseTreeArity>> {
-        let root = VecStore::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
+        let root = VecStore::build::<A, BaseTreeArity>(&mut data, dbg!(leafs), row_count, None)?;
         let branches = BaseTreeArity::to_usize();
 
         let tree_len = get_merkle_tree_len(leafs, branches)?;

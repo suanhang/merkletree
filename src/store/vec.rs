@@ -3,7 +3,6 @@ use anyhow::Result;
 use crate::hash::{ArrayLength, ArrayLengthMarker};
 use crate::store::{Store, StoreConfig};
 use generic_array::GenericArray;
-use typenum::Unsigned;
 
 #[derive(Debug, Clone, Default)]
 pub struct VecStore<N: ArrayLength> {
@@ -39,6 +38,7 @@ impl<N: ArrayLength> Store<N> for VecStore<N> {
             N::to_usize()
         );
         let len = buf.len();
+        let start = start * N::to_usize();
 
         if self.data.len() < start + len {
             self.data.resize(start + len, 0);
