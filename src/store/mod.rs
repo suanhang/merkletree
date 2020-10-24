@@ -2,11 +2,11 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::iter::FromIterator;
-use std::ops;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
+use generic_array::GenericArray;
 use positioned_io::ReadAt;
 use rayon::iter::plumbing::*;
 use rayon::iter::*;
@@ -14,8 +14,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use typenum::marker_traits::Unsigned;
 
-use crate::hash::Algorithm;
-use crate::merkle::{get_merkle_tree_row_count, log2_pow2, next_pow2, Element};
+use crate::hash::{Algorithm, ArrayLength};
+use crate::merkle::{get_merkle_tree_row_count, log2_pow2, next_pow2};
 
 /// Tree size (number of nodes) used as threshold to decide which build algorithm
 /// to use. Small trees (below this value) use the old build algorithm, optimized
@@ -198,7 +198,7 @@ impl StoreConfig {
 }
 
 /// Backing store of the merkle tree.
-pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
+pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
     /// Creates a new store which can store up to `size` elements.
     fn new_with_config(size: usize, branches: usize, config: StoreConfig) -> Result<Self>;
     fn new(size: usize) -> Result<Self>;
@@ -214,7 +214,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
 
     fn new_from_disk(size: usize, branches: usize, config: &StoreConfig) -> Result<Self>;
 
-    fn write_at(&mut self, el: E, index: usize) -> Result<()>;
+    fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()>;
 
     // Used to reduce lock contention and do the `E` to `u8`
     // conversion in `build` *outside* the lock.
@@ -237,16 +237,15 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
     // where this is arguably not important/needed).
     fn delete(config: StoreConfig) -> Result<()>;
 
-    fn read_at(&self, index: usize) -> Result<E>;
-    fn read_range(&self, r: ops::Range<usize>) -> Result<Vec<E>>;
+    fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>>;
     fn read_into(&self, pos: usize, buf: &mut [u8]) -> Result<()>;
     fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()>;
 
     fn len(&self) -> usize;
     fn loaded_from_disk(&self) -> bool;
     fn is_empty(&self) -> bool;
-    fn push(&mut self, el: E) -> Result<()>;
-    fn last(&self) -> Result<E> {
+    fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()>;
+    fn last(&self) -> Result<GenericArray<u8, N>> {
         self.read_at(self.len() - 1)
     }
 
@@ -257,11 +256,11 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
     }
 
     #[inline]
-    fn build_small_tree<A: Algorithm<E>, U: Unsigned>(
+    fn build_small_tree<A: Algorithm, U: Unsigned>(
         &mut self,
         leafs: usize,
         row_count: usize,
-    ) -> Result<E> {
+    ) -> Result<GenericArray<u8, N>> {
         ensure!(leafs % 2 == 0, "Leafs must be a power of two");
 
         let mut level: usize = 0;
@@ -270,6 +269,8 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
         let branches = U::to_usize();
         let shift = log2_pow2(branches);
 
+        let mut parts = vec![0u8; width * N::to_usize()];
+        
         while width > 1 {
             // Same indexing logic as `build`.
             let (layer, write_start) = {
@@ -280,10 +281,10 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
                     (level_node_index, level_node_index + width)
                 };
 
-                let layer: Vec<_> = self
-                    .read_range(read_start..read_start + width)?
-                    .par_chunks(branches)
-                    .map(|nodes| A::default().multi_node(&nodes, level))
+                self.read_range_into(read_start, read_start + width, &mut parts)?;
+                let layer: Vec<_> = parts
+                    .par_chunks(branches * N::to_usize())
+                    .map(|nodes| A::new().multi_node(nodes.chunks(N::to_usize()), level))
                     .collect();
 
                 (layer, write_start)
@@ -305,7 +306,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
         self.last()
     }
 
-    fn process_layer<A: Algorithm<E>, U: Unsigned>(
+    fn process_layer<A: Algorithm, U: Unsigned>(
         &mut self,
         width: usize,
         level: usize,
@@ -322,17 +323,19 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
         // optimized for big sector sizes (small ones will just have one thread doing all
         // the work).
         ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
-        Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
+        Vec::from_iter((dbg!(read_start)..read_start + dbg!(width)).step_by(BUILD_CHUNK_NODES))
             .par_iter()
             .try_for_each(|&chunk_index| -> Result<()> {
                 let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                 let chunk_nodes = {
+                    let mut chunked_nodes = vec![0u8; chunk_size * dbg!(N::to_usize())];
                     // Read everything taking the lock once.
                     data_lock
                         .read()
                         .unwrap()
-                        .read_range(chunk_index..chunk_index + chunk_size)?
+                        .read_range_into(dbg!(chunk_index), chunk_index + dbg!(chunk_size), &mut chunked_nodes)?;
+                    chunked_nodes
                 };
 
                 // We write the hashed nodes to the next level in the
@@ -340,11 +343,11 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
                 // previous pair (dividing by branches).
                 let write_delta = (chunk_index - read_start) / branches;
 
-                let nodes_size = (chunk_nodes.len() / branches) * E::byte_len();
-                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches).fold(
+                let nodes_size = (chunk_nodes.len() / branches) * N::to_usize();
+                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches * N::to_usize()).fold(
                     Vec::with_capacity(nodes_size),
                     |mut acc, nodes| {
-                        let h = A::default().multi_node(&nodes, level);
+                        let h = A::new().multi_node(nodes.chunks(N::to_usize()), level);
                         acc.extend_from_slice(h.as_ref());
                         acc
                     },
@@ -352,7 +355,7 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
 
                 // Check that we correctly pre-allocated the space.
                 ensure!(
-                    hashed_nodes_as_bytes.len() == chunk_size / branches * E::byte_len(),
+                    hashed_nodes_as_bytes.len() == chunk_size / branches * N::to_usize(),
                     "Invalid hashed node length"
                 );
 
@@ -365,12 +368,12 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
     }
 
     // Default merkle-tree build, based on store type.
-    fn build<A: Algorithm<E>, U: Unsigned>(
+    fn build<A: Algorithm, U: Unsigned>(
         &mut self,
         leafs: usize,
         row_count: usize,
         _config: Option<StoreConfig>,
-    ) -> Result<E> {
+    ) -> Result<GenericArray<u8, N>> {
         let branches = U::to_usize();
         ensure!(
             next_pow2(branches) == branches,
@@ -425,8 +428,8 @@ pub trait Store<E: Element>: std::fmt::Debug + Send + Sync + Sized {
 
 macro_rules! impl_parallel_iter {
     ($name:ident, $producer:ident, $iter:ident) => {
-        impl<E: Element> ParallelIterator for $name<E> {
-            type Item = E;
+        impl<N: ArrayLength> ParallelIterator for $name<N> {
+            type Item = GenericArray<u8, N>;
 
             fn drive_unindexed<C>(self, consumer: C) -> C::Result
             where
@@ -439,8 +442,8 @@ macro_rules! impl_parallel_iter {
                 Some(Store::len(self))
             }
         }
-        impl<'a, E: Element> ParallelIterator for &'a $name<E> {
-            type Item = E;
+        impl<'a, N: ArrayLength> ParallelIterator for &'a $name<N> {
+            type Item = GenericArray<u8, N>;
 
             fn drive_unindexed<C>(self, consumer: C) -> C::Result
             where
@@ -454,7 +457,7 @@ macro_rules! impl_parallel_iter {
             }
         }
 
-        impl<E: Element> IndexedParallelIterator for $name<E> {
+        impl<N: ArrayLength> IndexedParallelIterator for $name<N> {
             fn drive<C>(self, consumer: C) -> C::Result
             where
                 C: Consumer<Self::Item>,
@@ -470,11 +473,11 @@ macro_rules! impl_parallel_iter {
             where
                 CB: ProducerCallback<Self::Item>,
             {
-                callback.callback(<$producer<E>>::new(0, Store::len(&self), &self))
+                callback.callback(<$producer<N>>::new(0, Store::len(&self), &self))
             }
         }
 
-        impl<'a, E: Element> IndexedParallelIterator for &'a $name<E> {
+        impl<'a, N: ArrayLength> IndexedParallelIterator for &'a $name<N> {
             fn drive<C>(self, consumer: C) -> C::Result
             where
                 C: Consumer<Self::Item>,
@@ -490,19 +493,19 @@ macro_rules! impl_parallel_iter {
             where
                 CB: ProducerCallback<Self::Item>,
             {
-                callback.callback(<$producer<E>>::new(0, Store::len(self), self))
+                callback.callback(<$producer<N>>::new(0, Store::len(self), self))
             }
         }
 
         #[derive(Debug, Clone)]
-        pub struct $producer<'data, E: 'data + Element> {
+        pub struct $producer<'data, N: 'data + ArrayLength> {
             pub(crate) current: usize,
             pub(crate) end: usize,
-            pub(crate) store: &'data $name<E>,
+            pub(crate) store: &'data $name<N>,
         }
 
-        impl<'data, E: 'data + Element> $producer<'data, E> {
-            pub fn new(current: usize, end: usize, store: &'data $name<E>) -> Self {
+        impl<'data, N: 'data + ArrayLength> $producer<'data, N> {
+            pub fn new(current: usize, end: usize, store: &'data $name<N>) -> Self {
                 Self {
                     current,
                     end,
@@ -519,9 +522,9 @@ macro_rules! impl_parallel_iter {
             }
         }
 
-        impl<'data, E: 'data + Element> Producer for $producer<'data, E> {
-            type Item = E;
-            type IntoIter = $iter<'data, E>;
+        impl<'data, N: 'data + ArrayLength> Producer for $producer<'data, N> {
+            type Item = GenericArray<u8, N>;
+            type IntoIter = $iter<'data, N>;
 
             fn into_iter(self) -> Self::IntoIter {
                 let $producer {
@@ -543,8 +546,8 @@ macro_rules! impl_parallel_iter {
 
                 if len == 0 {
                     return (
-                        <$producer<E>>::new(0, 0, &self.store),
-                        <$producer<E>>::new(0, 0, &self.store),
+                        <$producer<N>>::new(0, 0, &self.store),
+                        <$producer<N>>::new(0, 0, &self.store),
                     );
                 }
 
@@ -555,27 +558,27 @@ macro_rules! impl_parallel_iter {
                 debug_assert!(current + len >= first_end);
 
                 (
-                    <$producer<E>>::new(current, first_end, &self.store),
-                    <$producer<E>>::new(first_end, current + len, &self.store),
+                    <$producer<N>>::new(current, first_end, &self.store),
+                    <$producer<N>>::new(first_end, current + len, &self.store),
                 )
             }
         }
         #[derive(Debug)]
-        pub struct $iter<'data, E: 'data + Element> {
+        pub struct $iter<'data, N: 'data + ArrayLength> {
             current: usize,
             end: usize,
             err: bool,
-            store: &'data $name<E>,
+            store: &'data $name<N>,
         }
 
-        impl<'data, E: 'data + Element> $iter<'data, E> {
+        impl<'data, N: 'data + ArrayLength> $iter<'data, N> {
             fn is_done(&self) -> bool {
                 !self.err && self.len() == 0
             }
         }
 
-        impl<'data, E: 'data + Element> Iterator for $iter<'data, E> {
-            type Item = E;
+        impl<'data, N: 'data + ArrayLength> Iterator for $iter<'data, N> {
+            type Item = GenericArray<u8, N>;
 
             fn next(&mut self) -> Option<Self::Item> {
                 if self.is_done() {
@@ -595,14 +598,14 @@ macro_rules! impl_parallel_iter {
             }
         }
 
-        impl<'data, E: 'data + Element> ExactSizeIterator for $iter<'data, E> {
+        impl<'data, N: 'data + ArrayLength> ExactSizeIterator for $iter<'data, N> {
             fn len(&self) -> usize {
                 debug_assert!(self.current <= self.end);
                 self.end - self.current
             }
         }
 
-        impl<'data, E: 'data + Element> DoubleEndedIterator for $iter<'data, E> {
+        impl<'data, N: 'data + ArrayLength> DoubleEndedIterator for $iter<'data, N> {
             fn next_back(&mut self) -> Option<Self::Item> {
                 if self.is_done() {
                     return None;

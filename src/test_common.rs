@@ -1,9 +1,9 @@
-use crate::hash::*;
-use crate::merkle::{Element, MerkleTree};
+use crate::merkle::MerkleTree;
 use crate::store::VecStore;
+use digest::{Digest, FixedOutputDirty, Reset, Update};
+use generic_array::GenericArray;
 use std::fmt;
-use std::hash::Hasher;
-use typenum::marker_traits::Unsigned;
+use typenum::Unsigned;
 
 pub const SIZE: usize = 0x10;
 
@@ -19,37 +19,34 @@ pub struct XOR128 {
     i: usize,
 }
 
-impl XOR128 {
-    pub fn new() -> XOR128 {
-        XOR128 {
-            data: [0; SIZE],
-            i: 0,
-        }
+impl FixedOutputDirty for XOR128 {
+    type OutputSize = typenum::U16;
+
+    fn finalize_into_dirty(&mut self, out: &mut GenericArray<u8, Self::OutputSize>) {
+        out.copy_from_slice(&self.data)
     }
 }
 
-impl Hasher for XOR128 {
-    fn write(&mut self, bytes: &[u8]) {
-        for x in bytes {
+impl Update for XOR128 {
+    fn update(&mut self, data: impl AsRef<[u8]>) {
+        for x in data.as_ref() {
             self.data[self.i & (SIZE - 1)] ^= *x;
             self.i += 1;
         }
     }
 
-    fn finish(&self) -> u64 {
-        unimplemented!()
+    fn chain(mut self, data: impl AsRef<[u8]>) -> Self
+    where
+        Self: Sized,
+    {
+        digest::Update::update(&mut self, data);
+        self
     }
 }
 
-impl Algorithm<Item> for XOR128 {
-    #[inline]
-    fn hash(&mut self) -> [u8; 16] {
-        self.data
-    }
-
-    #[inline]
+impl Reset for XOR128 {
     fn reset(&mut self) {
-        *self = XOR128::new();
+        *self = Self::new();
     }
 }
 
@@ -69,29 +66,12 @@ impl fmt::UpperHex for XOR128 {
     }
 }
 
-impl Element for [u8; 16] {
-    fn byte_len() -> usize {
-        16
-    }
-
-    fn from_slice(bytes: &[u8]) -> Self {
-        assert_eq!(bytes.len(), Self::byte_len());
-        let mut el = [0u8; 16];
-        el[..].copy_from_slice(bytes);
-        el
-    }
-
-    fn copy_to_slice(&self, bytes: &mut [u8]) {
-        bytes.copy_from_slice(self);
-    }
-}
-
 pub fn get_vec_tree_from_slice<U: Unsigned>(
     leafs: usize,
-) -> MerkleTree<Item, XOR128, VecStore<Item>, U> {
+) -> MerkleTree<XOR128, VecStore<typenum::U16>, U> {
     let mut x = Vec::with_capacity(leafs);
     for i in 0..leafs {
-        x.push(i * 93);
+        x.push((i * 93).to_le_bytes());
     }
     MerkleTree::from_data(&x).expect("failed to create tree from slice")
 }

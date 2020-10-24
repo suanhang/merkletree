@@ -1,26 +1,26 @@
 use std::fs::{File, OpenOptions};
-use std::marker::PhantomData;
 use std::ops;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use generic_array::GenericArray;
 use memmap::MmapMut;
 
-use crate::merkle::Element;
+use crate::hash::{ArrayLength, ArrayLengthMarker};
 use crate::store::{Store, StoreConfig};
 
 /// Store that saves the data on disk, and accesses it using memmap.
 #[derive(Debug)]
-pub struct MmapStore<E: Element> {
+pub struct MmapStore<N: ArrayLength> {
     path: PathBuf,
     map: Option<MmapMut>,
     file: File,
     len: usize,
     store_size: usize,
-    _e: PhantomData<E>,
+    _n: ArrayLengthMarker<N>,
 }
 
-impl<E: Element> ops::Deref for MmapStore<E> {
+impl<N: ArrayLength> ops::Deref for MmapStore<N> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -28,7 +28,7 @@ impl<E: Element> ops::Deref for MmapStore<E> {
     }
 }
 
-impl<E: Element> Store<E> for MmapStore<E> {
+impl<N: ArrayLength> Store<N> for MmapStore<N> {
     #[allow(unsafe_code)]
     fn new_with_config(size: usize, branches: usize, config: StoreConfig) -> Result<Self> {
         let data_path = StoreConfig::data_path(&config.path, &config.id);
@@ -45,7 +45,7 @@ impl<E: Element> Store<E> for MmapStore<E> {
             .create_new(true)
             .open(&data_path)?;
 
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
         file.set_len(store_size as u64)?;
 
         let map = unsafe { MmapMut::map_mut(&file)? };
@@ -56,13 +56,13 @@ impl<E: Element> Store<E> for MmapStore<E> {
             file,
             len: 0,
             store_size,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
     #[allow(unsafe_code)]
     fn new(size: usize) -> Result<Self> {
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
 
         let file = tempfile::NamedTempFile::new()?;
         file.as_file().set_len(store_size as u64)?;
@@ -75,7 +75,7 @@ impl<E: Element> Store<E> for MmapStore<E> {
             file,
             len: 0,
             store_size,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
@@ -89,9 +89,9 @@ impl<E: Element> Store<E> for MmapStore<E> {
 
         // Sanity check.
         ensure!(
-            store_size == size * E::byte_len(),
+            store_size == size * N::to_usize(),
             "Invalid formatted file provided. Expected {} bytes, found {} bytes",
-            size * E::byte_len(),
+            size * N::to_usize(),
             store_size
         );
 
@@ -103,19 +103,19 @@ impl<E: Element> Store<E> for MmapStore<E> {
             file,
             len: size,
             store_size,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
-    fn write_at(&mut self, el: E, index: usize) -> Result<()> {
-        let start = index * E::byte_len();
-        let end = start + E::byte_len();
+    fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
 
         if self.map.is_none() {
             self.reinit()?;
         }
 
-        self.map.as_mut().unwrap()[start..end].copy_from_slice(el.as_ref());
+        self.map.as_mut().unwrap()[start..end].copy_from_slice(&el.as_ref()[..N::to_usize()]);
         self.len = std::cmp::max(self.len, index + 1);
 
         Ok(())
@@ -123,12 +123,12 @@ impl<E: Element> Store<E> for MmapStore<E> {
 
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) -> Result<()> {
         ensure!(
-            buf.len() % E::byte_len() == 0,
+            buf.len() % N::to_usize() == 0,
             "buf size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
-        let map_start = start * E::byte_len();
+        let map_start = start * N::to_usize();
         let map_end = map_start + buf.len();
 
         if self.map.is_none() {
@@ -136,7 +136,7 @@ impl<E: Element> Store<E> for MmapStore<E> {
         }
 
         self.map.as_mut().unwrap()[map_start..map_end].copy_from_slice(buf);
-        self.len = std::cmp::max(self.len, start + (buf.len() / E::byte_len()));
+        self.len = std::cmp::max(self.len, start + (buf.len() / N::to_usize()));
 
         Ok(())
     }
@@ -148,9 +148,9 @@ impl<E: Element> Store<E> for MmapStore<E> {
         config: StoreConfig,
     ) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new_with_config(size, branches, config)?;
@@ -167,7 +167,7 @@ impl<E: Element> Store<E> for MmapStore<E> {
             let len = data.len();
 
             store.map.as_mut().unwrap()[0..len].copy_from_slice(data);
-            store.len = len / E::byte_len();
+            store.len = len / N::to_usize();
         }
 
         Ok(store)
@@ -175,9 +175,9 @@ impl<E: Element> Store<E> for MmapStore<E> {
 
     fn new_from_slice(size: usize, data: &[u8]) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new(size)?;
@@ -185,30 +185,31 @@ impl<E: Element> Store<E> for MmapStore<E> {
 
         let len = data.len();
         store.map.as_mut().unwrap()[0..len].copy_from_slice(data);
-        store.len = len / E::byte_len();
+        store.len = len / N::to_usize();
 
         Ok(store)
     }
 
-    fn read_at(&self, index: usize) -> Result<E> {
+    fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>> {
         ensure!(self.map.is_some(), "Internal map needs to be initialized");
 
-        let start = index * E::byte_len();
-        let end = start + E::byte_len();
-        let len = self.len * E::byte_len();
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
+        let len = self.len * N::to_usize();
 
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        Ok(E::from_slice(&self.map.as_ref().unwrap()[start..end]))
+        let res: &GenericArray<u8, N> = self.map.as_ref().unwrap()[start..end].into();
+        Ok(res.clone())
     }
 
     fn read_into(&self, index: usize, buf: &mut [u8]) -> Result<()> {
         ensure!(self.map.is_some(), "Internal map needs to be initialized");
 
-        let start = index * E::byte_len();
-        let end = start + E::byte_len();
-        let len = self.len * E::byte_len();
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
+        let len = self.len * N::to_usize();
 
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
@@ -218,24 +219,19 @@ impl<E: Element> Store<E> for MmapStore<E> {
         Ok(())
     }
 
-    fn read_range_into(&self, _start: usize, _end: usize, _buf: &mut [u8]) -> Result<()> {
-        unimplemented!("Not required here");
-    }
-
-    fn read_range(&self, r: ops::Range<usize>) -> Result<Vec<E>> {
+    fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
         ensure!(self.map.is_some(), "Internal map needs to be initialized");
 
-        let start = r.start * E::byte_len();
-        let end = r.end * E::byte_len();
-        let len = self.len * E::byte_len();
+        let start = start * N::to_usize();
+        let end = end * N::to_usize();
 
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        Ok(self.map.as_ref().unwrap()[start..end]
-            .chunks(E::byte_len())
-            .map(E::from_slice)
-            .collect())
+        buf.copy_from_slice(&self.map.as_ref().unwrap()[start..end]);
+
+        Ok(())
     }
 
     fn len(&self) -> usize {
@@ -273,7 +269,7 @@ impl<E: Element> Store<E> for MmapStore<E> {
         self.len == 0
     }
 
-    fn push(&mut self, el: E) -> Result<()> {
+    fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
         let l = self.len;
 
         if self.map.is_none() {
@@ -281,10 +277,10 @@ impl<E: Element> Store<E> for MmapStore<E> {
         }
 
         ensure!(
-            (l + 1) * E::byte_len() <= self.map.as_ref().unwrap().len(),
+            (l + 1) * N::to_usize() <= self.map.as_ref().unwrap().len(),
             "not enough space"
         );
 
-        self.write_at(el, l)
+        self.write_at(el.into(), l)
     }
 }

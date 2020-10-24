@@ -1,60 +1,50 @@
-use std::ops::{self, Index};
-
 use anyhow::Result;
 
-use crate::merkle::Element;
+use crate::hash::{ArrayLength, ArrayLengthMarker};
 use crate::store::{Store, StoreConfig};
+use generic_array::GenericArray;
+use typenum::Unsigned;
 
 #[derive(Debug, Clone, Default)]
-pub struct VecStore<E: Element>(Vec<E>);
-
-impl<E: Element> ops::Deref for VecStore<E> {
-    type Target = [E];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+pub struct VecStore<N: ArrayLength> {
+    data: Vec<u8>,
+    _n: ArrayLengthMarker<N>,
 }
 
-impl<E: Element> Store<E> for VecStore<E> {
+impl<N: ArrayLength> Store<N> for VecStore<N> {
     fn new_with_config(size: usize, _branches: usize, _config: StoreConfig) -> Result<Self> {
         Self::new(size)
     }
 
     fn new(size: usize) -> Result<Self> {
-        Ok(VecStore(Vec::with_capacity(size)))
+        Ok(VecStore {
+            data: Vec::with_capacity(size * N::to_usize()),
+            _n: Default::default(),
+        })
     }
 
-    fn write_at(&mut self, el: E, index: usize) -> Result<()> {
-        if self.0.len() <= index {
-            self.0.resize(index + 1, E::default());
+    fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
+        if self.data.len() <= index {
+            self.data.resize(index + N::to_usize(), 0);
         }
 
-        self.0[index] = el;
+        self.data[index..index + N::to_usize()].copy_from_slice(&el.as_ref()[..N::to_usize()]);
         Ok(())
     }
 
-    // NOTE: Performance regression. To conform with the current API we are
-    // unnecessarily converting to and from `&[u8]` in the `VecStore` which
-    // already stores `E` (in contrast with the `mmap` versions). We are
-    // prioritizing performance for the `mmap` case which will be used in
-    // production (`VecStore` is mainly for testing and backwards compatibility).
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) -> Result<()> {
         ensure!(
-            buf.len() % E::byte_len() == 0,
+            buf.len() % N::to_usize() == 0,
             "buf size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
-        let num_elem = buf.len() / E::byte_len();
+        let len = buf.len();
 
-        if self.0.len() < start + num_elem {
-            self.0.resize(start + num_elem, E::default());
+        if self.data.len() < start + len {
+            self.data.resize(start + len, 0);
         }
 
-        self.0.splice(
-            start..start + num_elem,
-            buf.chunks_exact(E::byte_len()).map(E::from_slice),
-        );
+        self.data[start..start + len].copy_from_slice(buf);
         Ok(())
     }
 
@@ -68,39 +58,58 @@ impl<E: Element> Store<E> for VecStore<E> {
     }
 
     fn new_from_slice(size: usize, data: &[u8]) -> Result<Self> {
-        let mut v: Vec<_> = data
-            .chunks_exact(E::byte_len())
-            .map(E::from_slice)
-            .collect();
-        let additional = size - v.len();
-        v.reserve(additional);
+        ensure!(
+            data.len() % N::to_usize() == 0,
+            "data size must be a multiple of {}",
+            N::to_usize()
+        );
 
-        Ok(VecStore(v))
+        let mut v = vec![0u8; size * N::to_usize()];
+        v[..data.len()].copy_from_slice(data);
+
+        Ok(VecStore {
+            data: v,
+            _n: Default::default(),
+        })
     }
 
     fn new_from_disk(_size: usize, _branches: usize, _config: &StoreConfig) -> Result<Self> {
         unimplemented!("Cannot load a VecStore from disk");
     }
 
-    fn read_at(&self, index: usize) -> Result<E> {
-        Ok(self.0[index].clone())
+    fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>> {
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
+        let res: &GenericArray<u8, N> = self.data[start..end].into();
+
+        Ok(res.clone())
     }
 
     fn read_into(&self, index: usize, buf: &mut [u8]) -> Result<()> {
-        self.0[index].copy_to_slice(buf);
+        assert_eq!(buf.len(), N::to_usize());
+
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
+        buf.copy_from_slice(&self.data[start..end]);
+
         Ok(())
     }
 
-    fn read_range_into(&self, _start: usize, _end: usize, _buf: &mut [u8]) -> Result<()> {
-        unimplemented!("Not required here");
-    }
+    fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
+        let start = start * N::to_usize();
+        let end = end * N::to_usize();
 
-    fn read_range(&self, r: ops::Range<usize>) -> Result<Vec<E>> {
-        Ok(self.0.index(r).to_vec())
+        let len = self.len() * N::to_usize();
+        ensure!(start < len, "start out of range {} >= {}", start, len);
+        ensure!(end <= len, "end out of range {} > {}", end, len);
+
+        buf.copy_from_slice(&self.data[start..end]);
+
+        Ok(())
     }
 
     fn len(&self) -> usize {
-        self.0.len()
+        self.data.len() / N::to_usize()
     }
 
     fn loaded_from_disk(&self) -> bool {
@@ -113,7 +122,7 @@ impl<E: Element> Store<E> for VecStore<E> {
         _config: StoreConfig,
         _store_version: u32,
     ) -> Result<bool> {
-        self.0.shrink_to_fit();
+        self.data.shrink_to_fit();
 
         Ok(true)
     }
@@ -123,11 +132,12 @@ impl<E: Element> Store<E> for VecStore<E> {
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.data.is_empty()
     }
 
-    fn push(&mut self, el: E) -> Result<()> {
-        self.0.push(el);
+    fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
+        self.data.extend_from_slice(&el.into());
+
         Ok(())
     }
 }

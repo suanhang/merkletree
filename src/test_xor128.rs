@@ -11,6 +11,8 @@ use crate::store::{
     DiskStoreProducer, ExternalReader, LevelCacheStore, MmapStore, Store, StoreConfigDataVersion,
     SMALL_TREE_BUILD,
 };
+use digest::Digest;
+use generic_array::arr;
 use rayon::iter::{plumbing::*, IntoParallelIterator, ParallelIterator};
 use std::fs::OpenOptions;
 use std::io::prelude::*;
@@ -27,11 +29,11 @@ fn test_vec_tree_from_slice<U: Unsigned>(
     row_count: usize,
     num_challenges: usize,
 ) {
-    let mut x = [0; 16];
+    let mut x = [[0u8; 8]; 16];
     for i in 0..leafs {
-        x[i] = i * 93;
+        x[i] = (i * 93).to_le_bytes();
     }
-    let mt: MerkleTree<[u8; 16], XOR128, VecStore<_>, U> =
+    let mt: MerkleTree<XOR128, VecStore<_>, U> =
         MerkleTree::from_data(&x).expect("failed to create tree from slice");
     assert_eq!(mt.len(), len);
     assert_eq!(mt.leafs(), leafs);
@@ -58,14 +60,12 @@ fn test_vec_tree_from_iter<U: Unsigned>(
     assert_eq!(row_count, get_merkle_tree_row_count(leafs, branches));
 
     let mut a = XOR128::new();
-    let mt: MerkleTree<[u8; 16], XOR128, VecStore<_>, U> =
-        MerkleTree::try_from_iter((0..leafs).map(|x| {
-            a.reset();
-            (x * 3).hash(&mut a);
-            leafs.hash(&mut a);
-            Ok(a.hash())
-        }))
-        .expect("failed to create octree from iter");
+    let mt: MerkleTree<XOR128, VecStore<_>, U> = MerkleTree::try_from_iter((0..leafs).map(|x| {
+        a.update(&(x * 3).to_le_bytes());
+        a.update(&leafs.to_le_bytes());
+        Ok(a.finalize_reset())
+    }))
+    .expect("failed to create octree from iter");
 
     assert_eq!(mt.len(), len);
     assert_eq!(mt.leafs(), leafs);
@@ -81,10 +81,10 @@ fn test_vec_tree_from_iter<U: Unsigned>(
 pub fn get_disk_tree_from_slice<U: Unsigned>(
     leafs: usize,
     config: StoreConfig,
-) -> MerkleTree<[u8; 16], XOR128, DiskStore<[u8; 16]>, U> {
+) -> MerkleTree<XOR128, DiskStore<typenum::U16>, U> {
     let mut x = Vec::with_capacity(leafs);
     for i in 0..leafs {
-        x.push(i * 93);
+        x.push((i * 93).to_le_bytes());
     }
     MerkleTree::from_data_with_config(&x, config).expect("failed to create tree from slice")
 }
@@ -105,12 +105,12 @@ fn build_disk_tree_from_iter<U: Unsigned>(
     let mut a = XOR128::new();
 
     // Construct and store an MT using a named DiskStore.
-    let mt: MerkleTree<[u8; 16], XOR128, DiskStore<_>, U> = MerkleTree::try_from_iter_with_config(
+    let mt: MerkleTree<XOR128, DiskStore<_>, U> = MerkleTree::try_from_iter_with_config(
         (0..leafs).map(|x| {
             a.reset();
-            (x * 3).hash(&mut a);
-            leafs.hash(&mut a);
-            Ok(a.hash())
+            a.update(&(x * 3).to_le_bytes());
+            a.update(&leafs.to_le_bytes());
+            Ok(a.finalize_reset())
         }),
         config.clone(),
     )
@@ -127,7 +127,7 @@ pub fn get_levelcache_tree_from_slice<U: Unsigned>(
     row_count: usize,
     config: &StoreConfig,
     replica_path: &PathBuf,
-) -> MerkleTree<[u8; 16], XOR128, LevelCacheStore<[u8; 16], std::fs::File>, U> {
+) -> MerkleTree<XOR128, LevelCacheStore<typenum::U16, std::fs::File>, U> {
     let branches = U::to_usize();
     assert_eq!(
         len,
@@ -137,7 +137,7 @@ pub fn get_levelcache_tree_from_slice<U: Unsigned>(
 
     let mut x = Vec::with_capacity(leafs);
     for i in 0..leafs {
-        x.push(i * 3);
+        x.push((i * 3).to_le_bytes());
     }
 
     let mut mt = MerkleTree::from_data_with_config(&x, config.clone())
@@ -159,7 +159,7 @@ fn get_levelcache_tree_from_iter<U: Unsigned>(
     row_count: usize,
     config: &StoreConfig,
     replica_path: &PathBuf,
-) -> MerkleTree<[u8; 16], XOR128, LevelCacheStore<[u8; 16], std::fs::File>, U> {
+) -> MerkleTree<XOR128, LevelCacheStore<typenum::U16, std::fs::File>, U> {
     let branches = U::to_usize();
     assert_eq!(
         len,
@@ -170,13 +170,13 @@ fn get_levelcache_tree_from_iter<U: Unsigned>(
     let mut a = XOR128::new();
 
     // Construct and store an MT using a named LevelCacheStore.
-    let mut mt: MerkleTree<[u8; 16], XOR128, LevelCacheStore<_, std::fs::File>, U> =
+    let mut mt: MerkleTree<XOR128, LevelCacheStore<_, std::fs::File>, U> =
         MerkleTree::try_from_iter_with_config(
             (0..leafs).map(|x| {
                 a.reset();
-                (x * 3).hash(&mut a);
-                leafs.hash(&mut a);
-                Ok(a.hash())
+                a.update(&(x * 3).to_le_bytes());
+                a.update(leafs.to_le_bytes());
+                Ok(a.finalize_reset())
             }),
             config.clone(),
         )
@@ -210,9 +210,9 @@ fn test_disk_tree_from_iter<U: Unsigned>(
 
     // Sanity check loading the store from disk and then re-creating
     // the MT from it.
-    assert!(DiskStore::<[u8; 16]>::is_consistent(len, branches, &config).unwrap());
+    assert!(DiskStore::<typenum::U16>::is_consistent(len, branches, &config).unwrap());
     let store = DiskStore::new_from_disk(len, branches, &config).unwrap();
-    let mt_cache: MerkleTree<[u8; 16], XOR128, DiskStore<_>, U> =
+    let mt_cache: MerkleTree<XOR128, DiskStore<_>, U> =
         MerkleTree::from_data_store(store, leafs).unwrap();
 
     assert_eq!(mt_cache.len(), len);
@@ -247,9 +247,9 @@ fn test_levelcache_v1_tree_from_iter<U: Unsigned>(
 
     // Sanity check loading the store from disk and then re-creating
     // the MT from it.
-    assert!(DiskStore::<[u8; 16]>::is_consistent(len, branches, &config).unwrap());
+    assert!(DiskStore::<typenum::U16>::is_consistent(len, branches, &config).unwrap());
     let store = DiskStore::new_from_disk(len, branches, &config).unwrap();
-    let mut mt_cache: MerkleTree<[u8; 16], XOR128, DiskStore<_>, U> =
+    let mut mt_cache: MerkleTree<XOR128, DiskStore<_>, U> =
         MerkleTree::from_data_store(store, leafs).unwrap();
 
     assert_eq!(mt_cache.len(), len);
@@ -263,13 +263,13 @@ fn test_levelcache_v1_tree_from_iter<U: Unsigned>(
 
     // Then re-create an MT using LevelCacheStore and generate all proofs.
     assert!(
-        LevelCacheStore::<[u8; 16], std::fs::File>::is_consistent_v1(len, branches, &config)
+        LevelCacheStore::<typenum::U16, std::fs::File>::is_consistent_v1(len, branches, &config)
             .unwrap()
     );
-    let level_cache_store: LevelCacheStore<[u8; 16], std::fs::File> =
+    let level_cache_store: LevelCacheStore<_, std::fs::File> =
         LevelCacheStore::new_from_disk(len, branches, &config).unwrap();
 
-    let mt_level_cache: MerkleTree<[u8; 16], XOR128, LevelCacheStore<_, _>, U> =
+    let mt_level_cache: MerkleTree<XOR128, LevelCacheStore<_, _>, U> =
         MerkleTree::from_data_store(level_cache_store, leafs)
             .expect("Failed to create MT from data store");
 
@@ -399,29 +399,16 @@ fn test_levelcache_direct_build_octo() {
 }
 
 #[test]
-fn test_hasher_light() {
-    let mut h = XOR128::new();
-    "1234567812345678".hash(&mut h);
-    h.reset();
-    String::from("1234567812345678").hash(&mut h);
-    assert_eq!(format!("{:#X}", h), "0x31323334353637383132333435363738");
-    String::from("1234567812345678").hash(&mut h);
-    assert_eq!(format!("{:#X}", h), "0x00000000000000000000000000000000");
-    String::from("1234567812345678").hash(&mut h);
-    assert_eq!(format!("{:#X}", h), "0x31323334353637383132333435363738");
-}
-
-#[test]
 fn test_vec_from_slice() {
     let x = [String::from("ars"), String::from("zxc")];
-    let mt: MerkleTree<[u8; 16], XOR128, VecStore<_>> =
+    let mt: MerkleTree<XOR128, VecStore<_>> =
         MerkleTree::from_data(&x).expect("failed to create tree");
     assert_eq!(
         mt.read_range(0, 3).unwrap(),
         [
-            [0, 97, 114, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 122, 120, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 27, 10, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 97, 114, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 122, 120, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 27, 10, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ]
     );
     assert_eq!(mt.len(), 3);
@@ -429,7 +416,7 @@ fn test_vec_from_slice() {
     assert_eq!(mt.row_count(), 2);
     assert_eq!(
         mt.root(),
-        [1, 0, 27, 10, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        arr![u8; 1, 0, 27, 10, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     );
 
     for i in 0..mt.leafs() {
@@ -450,7 +437,7 @@ fn test_compound_tree_from_slices<B: Unsigned, N: Unsigned>(sub_tree_leafs: usiz
         sub_trees.push(get_vec_tree_from_slice::<B>(sub_tree_leafs));
     }
 
-    let tree: MerkleTree<[u8; 16], XOR128, VecStore<_>, B, N> =
+    let tree: MerkleTree<XOR128, VecStore<_>, B, N> =
         MerkleTree::from_trees(sub_trees).expect("Failed to build compound tree from sub trees");
 
     assert_eq!(
@@ -492,7 +479,7 @@ fn test_compound_tree_from_store_configs<B: Unsigned, N: Unsigned>(sub_tree_leaf
         sub_tree_configs.push(config);
     }
 
-    let tree: MerkleTree<[u8; 16], XOR128, DiskStore<_>, B, N> =
+    let tree: MerkleTree<XOR128, DiskStore<_>, B, N> =
         MerkleTree::from_store_configs(sub_tree_leafs, &sub_tree_configs)
             .expect("Failed to build compound tree");
 
@@ -541,6 +528,8 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
     let mut f_replica =
         std::fs::File::create(&replica_path).expect("failed to create replica file");
 
+    let mut data = vec![0u8; sub_tree_leafs * 16];
+
     for i in 0..sub_tree_count {
         let lc_name = format!(
             "{}-{}-{}-{}-lc-{}",
@@ -556,21 +545,19 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
             StoreConfig::default_rows_to_discard(sub_tree_leafs, branches),
         );
         build_disk_tree_from_iter::<B>(sub_tree_leafs, len, row_count, &config);
-        let store = DiskStore::new_with_config(len, branches, config.clone())
+        let store = DiskStore::<typenum::U16>::new_with_config(len, branches, config.clone())
             .expect("failed to open store");
 
         // Use that data store as the replica (concat the data to the replica_path)
-        let data: Vec<[u8; 16]> = store
-            .read_range(std::ops::Range {
-                start: 0,
-                end: sub_tree_leafs,
-            })
+
+        store
+            .read_range_into(0, sub_tree_leafs, &mut data)
             .expect("failed to read store");
-        for element in data {
-            f_replica
-                .write_all(&element)
-                .expect("failed to write replica data");
-        }
+
+        f_replica
+            .write_all(&data)
+            .expect("failed to write replica data");
+
         replica_offsets.push(i * (16 * sub_tree_leafs));
 
         let lc_config = StoreConfig::from_config(&config, String::from(lc_name), Some(len));
@@ -587,8 +574,12 @@ fn test_compound_levelcache_tree_from_store_configs<B: Unsigned, N: Unsigned>(
 
     let replica_config = ReplicaConfig::new(replica_path, replica_offsets);
     let tree =
-        MerkleTree::<[u8; 16], XOR128, LevelCacheStore<[u8; 16], std::fs::File>, B, N>::from_store_configs_and_replica(sub_tree_leafs, &sub_tree_configs, &replica_config)
-            .expect("Failed to build compound levelcache tree");
+        MerkleTree::<XOR128, LevelCacheStore<typenum::U16, std::fs::File>, B, N>::from_store_configs_and_replica(
+            sub_tree_leafs,
+            &sub_tree_configs,
+            &replica_config,
+        )
+        .expect("Failed to build compound levelcache tree");
 
     assert_eq!(
         tree.len(),
@@ -689,7 +680,7 @@ fn test_compound_quad_tree_from_slices() {
     let mt2 = get_vec_tree_from_slice::<U4>(leafs);
     let mt3 = get_vec_tree_from_slice::<U4>(leafs);
 
-    let tree: MerkleTree<[u8; 16], XOR128, VecStore<_>, U4, U3> =
+    let tree: MerkleTree<XOR128, VecStore<_>, U4, U3> =
         MerkleTree::from_trees(vec![mt1, mt2, mt3]).expect("Failed to build compound tree");
     assert_eq!(tree.len(), 16);
     assert_eq!(tree.leafs(), 12);
@@ -712,7 +703,7 @@ fn test_compound_octree_from_slices() {
     let mt4 = get_vec_tree_from_slice::<U8>(leafs);
     let mt5 = get_vec_tree_from_slice::<U8>(leafs);
 
-    let tree: MerkleTree<[u8; 16], XOR128, VecStore<_>, U8, U5> =
+    let tree: MerkleTree<XOR128, VecStore<_>, U8, U5> =
         MerkleTree::from_trees(vec![mt1, mt2, mt3, mt4, mt5])
             .expect("Failed to build compound tree");
 
@@ -881,7 +872,7 @@ fn test_xlarge_octo_with_partial_cache() {
 #[test]
 fn test_read_into() {
     let x = [String::from("ars"), String::from("zxc")];
-    let mt: MerkleTree<[u8; 16], XOR128, VecStore<_>> =
+    let mt: MerkleTree<XOR128, VecStore<_>> =
         MerkleTree::from_data(&x).expect("failed to create tree");
     let target_data = [
         [0, 97, 114, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -902,7 +893,7 @@ fn test_read_into() {
         StoreConfig::default_rows_to_discard(x.len(), BINARY_ARITY),
     );
 
-    let mt2: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+    let mt2: MerkleTree<XOR128, DiskStore<_>> =
         MerkleTree::from_data_with_config(&x, config).expect("failed to create tree");
     for (pos, &data) in target_data.iter().enumerate() {
         mt2.read_into(pos, &mut read_buffer).unwrap();
@@ -914,11 +905,10 @@ fn test_read_into() {
 fn test_from_iter() {
     let mut a = XOR128::new();
 
-    let mt: MerkleTree<[u8; 16], XOR128, VecStore<_>> =
+    let mt: MerkleTree<XOR128, VecStore<_>> =
         MerkleTree::try_from_iter(["a", "b", "c", "d"].iter().map(|x| {
-            a.reset();
-            x.hash(&mut a);
-            Ok(a.hash())
+            a.update(x);
+            Ok(a.finalize_reset())
         }))
         .unwrap();
     assert_eq!(mt.len(), 7);
@@ -927,89 +917,88 @@ fn test_from_iter() {
 
 #[test]
 fn test_simple_tree() {
-    let answer: Vec<Vec<[u8; 16]>> = vec![
+    let answer: Vec<Vec<_>> = vec![
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
         vec![
-            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            arr![u8; 1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ],
     ];
 
     // pow 2 only supported
     for items in [2, 4].iter() {
         let mut a = XOR128::new();
-        let mt_base: MerkleTree<[u8; 16], XOR128, VecStore<_>> = MerkleTree::try_from_iter(
+        let mt_base: MerkleTree<XOR128, VecStore<_>> = MerkleTree::try_from_iter(
             [1, 2, 3, 4, 5, 6, 7, 8]
                 .iter()
-                .map(|x| {
-                    a.reset();
-                    x.hash(&mut a);
-                    Ok(a.hash())
+                .map(|x: &u8| {
+                    a.update(&x.to_le_bytes());
+                    Ok(a.finalize_reset())
                 })
                 .take(*items),
         )
@@ -1021,8 +1010,8 @@ fn test_simple_tree() {
             get_merkle_tree_row_count(mt_base.leafs(), BINARY_ARITY)
         );
         assert_eq!(
-            mt_base.read_range(0, mt_base.len()).unwrap(),
-            answer[*items - 2].as_slice()
+            &mt_base.read_range(0, mt_base.len()).unwrap()[..],
+            &answer[*items - 2][..],
         );
         assert_eq!(mt_base.read_at(0).unwrap(), mt_base.read_at(0).unwrap());
 
@@ -1034,21 +1023,16 @@ fn test_simple_tree() {
         let mut a2 = XOR128::new();
         let leafs: Vec<u8> = [1, 2, 3, 4, 5, 6, 7, 8]
             .iter()
-            .map(|x| {
-                a.reset();
-                x.hash(&mut a);
-                a.hash()
+            .map(|x: &u8| {
+                a.update(&x.to_be_bytes());
+                a.finalize_reset()
             })
             .take(*items)
-            .map(|item| {
-                a2.reset();
-                a2.leaf(item).as_ref().to_vec()
-            })
+            .map(|item| a2.leaf(item).to_vec())
             .flatten()
             .collect();
         {
-            let mt1: MerkleTree<[u8; 16], XOR128, VecStore<_>> =
-                MerkleTree::from_byte_slice(&leafs).unwrap();
+            let mt1: MerkleTree<XOR128, VecStore<_>> = MerkleTree::from_byte_slice(&leafs).unwrap();
             assert_eq!(mt1.leafs(), *items);
             assert_eq!(
                 mt1.row_count(),
@@ -1066,7 +1050,7 @@ fn test_simple_tree() {
         }
 
         {
-            let mt2: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+            let mt2: MerkleTree<XOR128, DiskStore<_>> =
                 MerkleTree::from_byte_slice(&leafs).unwrap();
             assert_eq!(mt2.leafs(), *items);
             assert_eq!(
@@ -1104,13 +1088,12 @@ fn test_large_tree_disk() {
     let a = XOR128::new();
     let count = SMALL_TREE_BUILD * SMALL_TREE_BUILD * 8;
 
-    let mt_disk: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+    let mt_disk: MerkleTree<XOR128, DiskStore<_>> =
         MerkleTree::from_par_iter((0..count).into_par_iter().map(|x| {
             let mut xor_128 = a.clone();
-            xor_128.reset();
-            x.hash(&mut xor_128);
-            93.hash(&mut xor_128);
-            xor_128.hash()
+            xor_128.update(&x.to_le_bytes());
+            xor_128.update(93u8.to_le_bytes());
+            xor_128.finalize_reset()
         }))
         .unwrap();
     assert_eq!(
@@ -1126,12 +1109,11 @@ fn test_mmap_tree() {
     let mut a = XOR128::new();
     let count = SMALL_TREE_BUILD * SMALL_TREE_BUILD * 128;
 
-    let mut mt_map: MerkleTree<[u8; 16], XOR128, MmapStore<_>> =
+    let mut mt_map: MerkleTree<XOR128, MmapStore<_>> =
         MerkleTree::try_from_iter((0..count).map(|x| {
-            a.reset();
-            x.hash(&mut a);
-            93.hash(&mut a);
-            Ok(a.hash())
+            a.update(&x.to_le_bytes());
+            a.update(93u8.to_le_bytes());
+            Ok(a.finalize_reset())
         }))
         .unwrap();
     assert_eq!(
@@ -1197,18 +1179,16 @@ fn test_level_cache_tree_v2() {
         StoreConfig::default_rows_to_discard(count, BINARY_ARITY),
     );
 
-    let mut mt_disk: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
-        MerkleTree::from_par_iter_with_config(
-            (0..count).into_par_iter().map(|x| {
-                let mut xor_128 = a.clone();
-                xor_128.reset();
-                x.hash(&mut xor_128);
-                99.hash(&mut xor_128);
-                xor_128.hash()
-            }),
-            config.clone(),
-        )
-        .expect("Failed to create MT");
+    let mut mt_disk: MerkleTree<XOR128, DiskStore<_>> = MerkleTree::from_par_iter_with_config(
+        (0..count).into_par_iter().map(|x| {
+            let mut xor_128 = a.clone();
+            xor_128.update(x.to_le_bytes());
+            xor_128.update(93u8.to_le_bytes());
+            xor_128.finalize_reset()
+        }),
+        config.clone(),
+    )
+    .expect("Failed to create MT");
     assert_eq!(
         mt_disk.len(),
         get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len")
@@ -1247,22 +1227,23 @@ fn test_level_cache_tree_v2() {
     }
 
     // Then re-create an MT using LevelCacheStore and generate all proofs.
-    assert!(LevelCacheStore::<[u8; 16], std::fs::File>::is_consistent(
-        get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
-        BINARY_ARITY,
-        &config
-    )
-    .unwrap());
-    let level_cache_store: LevelCacheStore<[u8; 16], _> =
-        LevelCacheStore::new_from_disk_with_reader(
+    assert!(
+        LevelCacheStore::<typenum::U16, std::fs::File>::is_consistent(
             get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
             BINARY_ARITY,
-            &config,
-            ExternalReader::new_from_path(&output_file).unwrap(),
+            &config
         )
-        .unwrap();
+        .unwrap()
+    );
+    let level_cache_store: LevelCacheStore<_, _> = LevelCacheStore::new_from_disk_with_reader(
+        get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
+        BINARY_ARITY,
+        &config,
+        ExternalReader::new_from_path(&output_file).unwrap(),
+    )
+    .unwrap();
 
-    let mt_level_cache: MerkleTree<[u8; 16], XOR128, LevelCacheStore<_, _>> =
+    let mt_level_cache: MerkleTree<XOR128, LevelCacheStore<_, _>> =
         MerkleTree::from_data_store(level_cache_store, count)
             .expect("Failed to create MT from data store");
     assert_eq!(
@@ -1308,13 +1289,12 @@ fn test_various_trees_with_partial_cache_v2_only() {
                 std::cmp::min(i, StoreConfig::default_rows_to_discard(count, BINARY_ARITY)),
             );
 
-            let mut mt_cache: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+            let mut mt_cache: MerkleTree<XOR128, DiskStore<_>> =
                 MerkleTree::try_from_iter_with_config(
                     (0..count).map(|x| {
-                        a.reset();
-                        x.hash(&mut a);
-                        count.hash(&mut a);
-                        Ok(a.hash())
+                        a.update(x.to_le_bytes());
+                        a.update(count.to_le_bytes());
+                        Ok(a.finalize_reset())
                     }),
                     config.clone(),
                 )
@@ -1322,7 +1302,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
 
             // Sanity check loading the store from disk and then
             // re-creating the MT from it.
-            assert!(DiskStore::<[u8; 16]>::is_consistent(
+            assert!(DiskStore::<typenum::U16>::is_consistent(
                 get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
                 BINARY_ARITY,
                 &config
@@ -1334,7 +1314,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
                 &config,
             )
             .unwrap();
-            let mt_cache2: MerkleTree<[u8; 16], XOR128, DiskStore<_>> =
+            let mt_cache2: MerkleTree<XOR128, DiskStore<_>> =
                 MerkleTree::from_data_store(store, count).unwrap();
 
             assert_eq!(mt_cache.len(), mt_cache2.len());
@@ -1394,13 +1374,15 @@ fn test_various_trees_with_partial_cache_v2_only() {
             }
 
             // Then re-create an MT using LevelCacheStore and generate all proofs.
-            assert!(LevelCacheStore::<[u8; 16], std::fs::File>::is_consistent(
-                get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
-                BINARY_ARITY,
-                &config
-            )
-            .unwrap());
-            let level_cache_store: LevelCacheStore<[u8; 16], _> =
+            assert!(
+                LevelCacheStore::<typenum::U16, std::fs::File>::is_consistent(
+                    get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
+                    BINARY_ARITY,
+                    &config
+                )
+                .unwrap()
+            );
+            let level_cache_store: LevelCacheStore<_, _> =
                 LevelCacheStore::new_from_disk_with_reader(
                     get_merkle_tree_len(count, BINARY_ARITY).expect("failed to get merkle len"),
                     BINARY_ARITY,
@@ -1409,7 +1391,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
                 )
                 .unwrap();
 
-            let mt_level_cache: MerkleTree<[u8; 16], XOR128, LevelCacheStore<_, _>> =
+            let mt_level_cache: MerkleTree<XOR128, LevelCacheStore<_, _>> =
                 MerkleTree::from_data_store(level_cache_store, count)
                     .expect("Failed to revive LevelCacheStore after compaction");
 
@@ -1436,7 +1418,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
                 .expect("Failed to delete test store");
 
             // This also works (delete the store directly)
-            //LevelCacheStore::<[u8; 16]>::delete(config.clone())
+            //LevelCacheStore::<typenum::U16>::delete(config.clone())
             //    .expect("Failed to delete test store");
         }
 
@@ -1447,7 +1429,7 @@ fn test_various_trees_with_partial_cache_v2_only() {
 #[test]
 fn test_parallel_iter_disk_1() {
     let data = vec![1u8; 16 * 128];
-    let store: DiskStore<[u8; 16]> = DiskStore::new_from_slice(128, &data).unwrap();
+    let store: DiskStore<typenum::U16> = DiskStore::new_from_slice(128, &data).unwrap();
 
     let p = DiskStoreProducer {
         current: 0,
@@ -1457,9 +1439,9 @@ fn test_parallel_iter_disk_1() {
 
     assert_eq!(p.len(), 128);
 
-    let collected: Vec<[u8; 16]> = p.clone().into_iter().collect();
+    let collected: Vec<_> = p.clone().into_iter().collect();
     for (a, b) in collected.iter().zip(data.chunks_exact(16)) {
-        assert_eq!(a, b);
+        assert_eq!(&a[..], b);
     }
 
     let (a1, b1) = p.clone().split_at(64);
@@ -1502,11 +1484,11 @@ fn test_parallel_iter_disk_1() {
     let (a, b) = p.clone().split_at(10);
 
     for (a, b) in a.into_iter().zip(data.chunks_exact(16).take(10)) {
-        assert_eq!(a, b);
+        assert_eq!(&a[..], b);
     }
 
     for (a, b) in b.into_iter().zip(data.chunks_exact(16).skip(10)) {
-        assert_eq!(a, b);
+        assert_eq!(&a[..], b);
     }
 
     let mut disk_iter = p.into_iter();
@@ -1525,7 +1507,7 @@ fn test_parallel_iter_disk_2() {
         println!(" --- {}", size);
 
         let data = vec![1u8; 16 * size];
-        let store: DiskStore<[u8; 16]> = DiskStore::new_from_slice(size, &data).unwrap();
+        let store: DiskStore<typenum::U16> = DiskStore::new_from_slice(size, &data).unwrap();
 
         let p = DiskStoreProducer {
             current: 0,
@@ -1538,9 +1520,9 @@ fn test_parallel_iter_disk_2() {
         let par_iter = store.into_par_iter();
         assert_eq!(Store::len(&par_iter), size);
 
-        let collected: Vec<[u8; 16]> = par_iter.collect();
+        let collected: Vec<_> = par_iter.collect();
         for (a, b) in collected.iter().zip(data.chunks_exact(16)) {
-            assert_eq!(a, b);
+            assert_eq!(&a[..], b);
         }
     }
 }

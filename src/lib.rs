@@ -165,9 +165,6 @@ extern crate anyhow;
 /// Hash infrastructure for items in Merkle tree.
 pub mod hash;
 
-/// Common implementations for [`Hashable`].
-mod hash_impl;
-
 /// Store implementations.
 pub mod store;
 
@@ -192,9 +189,4 @@ mod test_item;
 #[cfg(test)]
 mod test_sip;
 
-/// Tests for Merkle Hasher Customization.
-#[cfg(test)]
-mod test_cmh;
 
-#[macro_use]
-extern crate arrayref;

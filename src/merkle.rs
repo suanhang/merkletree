@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use digest::Digest;
+use generic_array::GenericArray;
 use log::debug;
 use rayon::prelude::*;
-use typenum::marker_traits::Unsigned;
-use typenum::{U0, U2};
+use typenum::{Unsigned, U0, U2};
 
-use crate::hash::{Algorithm, Hashable};
+use crate::hash::Algorithm;
 use crate::proof::Proof;
 use crate::store::{
     ExternalReader, LevelCacheStore, ReplicaConfig, Store, StoreConfig, VecStore, BUILD_CHUNK_NODES,
@@ -75,22 +76,21 @@ pub const BUILD_DATA_BLOCK_SIZE: usize = 64 * BUILD_CHUNK_NODES;
 /// layer merkle tree without layers (i.e. a conventional merkle
 /// tree).
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 #[allow(clippy::enum_variant_names)]
-enum Data<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
-{
+enum Data<A: Algorithm, S: Store<A::OutputSize>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned> {
     /// A BaseTree contains a single Store.
     BaseTree(S),
 
     /// A SubTree contains a list of BaseTrees.
-    SubTree(Vec<MerkleTree<E, A, S, BaseTreeArity>>),
+    SubTree(Vec<MerkleTree<A, S, BaseTreeArity>>),
 
     /// A TopTree contains a list of SubTrees.
-    TopTree(Vec<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>>),
+    TopTree(Vec<MerkleTree<A, S, BaseTreeArity, SubTreeArity>>),
 }
 
-impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
-    Data<E, A, S, BaseTreeArity, SubTreeArity>
+impl<A: Algorithm, S: Store<A::OutputSize>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
+    Data<A, S, BaseTreeArity, SubTreeArity>
 {
     /// Read-only access to the BaseTree store.
     fn store(&self) -> Option<&S> {
@@ -110,7 +110,7 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
 
     /// Access to the list of SubTrees.
     #[allow(clippy::type_complexity)]
-    fn sub_trees(&self) -> Option<&Vec<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>>> {
+    fn sub_trees(&self) -> Option<&Vec<MerkleTree<A, S, BaseTreeArity, SubTreeArity>>> {
         match self {
             Data::TopTree(s) => Some(s),
             _ => None,
@@ -118,15 +118,15 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
     }
 
     // Access to the list of BaseTrees.
-    fn base_trees(&self) -> Option<&Vec<MerkleTree<E, A, S, BaseTreeArity>>> {
+    fn base_trees(&self) -> Option<&Vec<MerkleTree<A, S, BaseTreeArity>>> {
         match self {
             Data::SubTree(s) => Some(s),
             _ => None,
         }
     }
 }
-impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
-    std::fmt::Debug for Data<E, A, S, BaseTreeArity, SubTreeArity>
+impl<A: Algorithm, S: Store<A::OutputSize>, BaseTreeArity: Unsigned, SubTreeArity: Unsigned>
+    std::fmt::Debug for Data<A, S, BaseTreeArity, SubTreeArity>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("enum Data").finish()
@@ -134,17 +134,16 @@ impl<E: Element, A: Algorithm<E>, S: Store<E>, BaseTreeArity: Unsigned, SubTreeA
 }
 
 #[allow(clippy::type_complexity)]
-#[derive(Clone, Eq, PartialEq)]
-pub struct MerkleTree<E, A, S, BaseTreeArity = U2, SubTreeArity = U0, TopTreeArity = U0>
+#[derive(Clone)]
+pub struct MerkleTree<A, S, BaseTreeArity = U2, SubTreeArity = U0, TopTreeArity = U0>
 where
-    E: Element,
-    A: Algorithm<E>,
-    S: Store<E>,
+    A: Algorithm,
+    S: Store<A::OutputSize>,
     BaseTreeArity: Unsigned,
     SubTreeArity: Unsigned,
     TopTreeArity: Unsigned,
 {
-    data: Data<E, A, S, BaseTreeArity, SubTreeArity>,
+    data: Data<A, S, BaseTreeArity, SubTreeArity>,
     leafs: usize,
     len: usize,
 
@@ -159,23 +158,21 @@ where
 
     // Cache with the `root` of the tree built from `data`. This allows to
     // not access the `Store` (e.g., access to disks in `DiskStore`).
-    root: E,
+    root: GenericArray<u8, A::OutputSize>,
 
     _a: PhantomData<A>,
-    _e: PhantomData<E>,
     _bta: PhantomData<BaseTreeArity>,
     _sta: PhantomData<SubTreeArity>,
     _tta: PhantomData<TopTreeArity>,
 }
 
 impl<
-        E: Element,
-        A: Algorithm<E>,
-        S: Store<E>,
+        A: Algorithm,
+        S: Store<A::OutputSize>,
         BaseTreeArity: Unsigned,
         SubTreeArity: Unsigned,
         TopTreeArity: Unsigned,
-    > std::fmt::Debug for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+    > std::fmt::Debug for MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MerkleTree")
@@ -188,25 +185,14 @@ impl<
     }
 }
 
-/// Element stored in the merkle tree.
-pub trait Element: Ord + Clone + AsRef<[u8]> + Sync + Send + Default + std::fmt::Debug {
-    /// Returns the length of an element when serialized as a byte slice.
-    fn byte_len() -> usize;
-
-    /// Creates the element from its byte form. Panics if the slice is not appropriately sized.
-    fn from_slice(bytes: &[u8]) -> Self;
-
-    fn copy_to_slice(&self, bytes: &mut [u8]);
-}
-
-impl<
-        E: Element,
-        A: Algorithm<E>,
-        BaseTreeArity: Unsigned,
-        SubTreeArity: Unsigned,
-        TopTreeArity: Unsigned,
+impl<A: Algorithm, BaseTreeArity: Unsigned, SubTreeArity: Unsigned, TopTreeArity: Unsigned>
+    MerkleTree<
+        A,
+        LevelCacheStore<A::OutputSize, std::fs::File>,
+        BaseTreeArity,
+        SubTreeArity,
+        TopTreeArity,
     >
-    MerkleTree<E, A, LevelCacheStore<E, std::fs::File>, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     /// Given a pathbuf, instantiate an ExternalReader and set it for the LevelCacheStore.
     pub fn set_external_reader_path(&mut self, path: &PathBuf) -> Result<()> {
@@ -231,9 +217,8 @@ impl<
         replica_config: &ReplicaConfig,
     ) -> Result<
         MerkleTree<
-            E,
             A,
-            LevelCacheStore<E, std::fs::File>,
+            LevelCacheStore<A::OutputSize, std::fs::File>,
             BaseTreeArity,
             SubTreeArity,
             TopTreeArity,
@@ -254,7 +239,7 @@ impl<
             )
             .context("failed to instantiate levelcache store")?;
             trees.push(
-                MerkleTree::<E, A, LevelCacheStore<_, _>, BaseTreeArity>::from_data_store(
+                MerkleTree::<A, LevelCacheStore<_, _>, BaseTreeArity>::from_data_store(
                     data, leafs,
                 )?,
             );
@@ -276,9 +261,8 @@ impl<
         replica_config: &ReplicaConfig,
     ) -> Result<
         MerkleTree<
-            E,
             A,
-            LevelCacheStore<E, std::fs::File>,
+            LevelCacheStore<A::OutputSize, std::fs::File>,
             BaseTreeArity,
             SubTreeArity,
             TopTreeArity,
@@ -301,7 +285,6 @@ impl<
                 offsets: replica_config.offsets[start..end].to_vec(),
             };
             trees.push(MerkleTree::<
-                E,
                 A,
                 LevelCacheStore<_, _>,
                 BaseTreeArity,
@@ -320,52 +303,49 @@ impl<
 }
 
 impl<
-        E: Element,
-        A: Algorithm<E>,
-        S: Store<E>,
+        A: Algorithm,
+        S: Store<A::OutputSize>,
         BaseTreeArity: Unsigned,
         SubTreeArity: Unsigned,
         TopTreeArity: Unsigned,
-    > MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+    > MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     /// Creates new merkle from a sequence of hashes.
-    pub fn new<I: IntoIterator<Item = E>>(
+    pub fn new<I: IntoIterator<Item = impl AsRef<[u8]>>>(
         data: I,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         Self::try_from_iter(data.into_iter().map(Ok))
     }
 
     /// Creates new merkle from a sequence of hashes.
-    pub fn new_with_config<I: IntoIterator<Item = E>>(
+    pub fn new_with_config<I: IntoIterator<Item = impl AsRef<[u8]>>>(
         data: I,
         config: StoreConfig,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         Self::try_from_iter_with_config(data.into_iter().map(Ok), config)
     }
 
     /// Creates new merkle tree from a list of hashable objects.
-    pub fn from_data<O: Hashable<A>, I: IntoIterator<Item = O>>(
+    pub fn from_data<I: IntoIterator<Item = impl AsRef<[u8]>>>(
         data: I,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
-        let mut a = A::default();
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        let mut a = A::new();
         Self::try_from_iter(data.into_iter().map(|x| {
-            a.reset();
-            x.hash(&mut a);
-            Ok(a.hash())
+            a.update(x);
+            Ok(a.finalize_reset())
         }))
     }
 
     /// Creates new merkle tree from a list of hashable objects.
-    pub fn from_data_with_config<O: Hashable<A>, I: IntoIterator<Item = O>>(
+    pub fn from_data_with_config<I: IntoIterator<Item = impl AsRef<[u8]>>>(
         data: I,
         config: StoreConfig,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
-        let mut a = A::default();
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        let mut a = A::new();
         Self::try_from_iter_with_config(
             data.into_iter().map(|x| {
-                a.reset();
-                x.hash(&mut a);
-                Ok(a.hash())
+                a.update(x);
+                Ok(a.finalize_reset())
             }),
             config,
         )
@@ -377,7 +357,7 @@ impl<
     pub fn from_data_store(
         data: S,
         leafs: usize,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             SubTreeArity::to_usize() == 0,
             "Data stores must not have sub-tree layers"
@@ -412,7 +392,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -423,7 +402,7 @@ impl<
     pub fn from_tree_slice(
         data: &[u8],
         leafs: usize,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             SubTreeArity::to_usize() == 0,
             "Data slice must not have sub-tree layers"
@@ -437,7 +416,7 @@ impl<
         let row_count = get_merkle_tree_row_count(leafs, branches);
         let tree_len = get_merkle_tree_len(leafs, branches)?;
         ensure!(
-            tree_len == data.len() / E::byte_len(),
+            tree_len == data.len() / <A as Digest>::OutputSize::to_usize(),
             "Inconsistent tree data"
         );
 
@@ -456,7 +435,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -468,7 +446,7 @@ impl<
         data: &[u8],
         leafs: usize,
         config: StoreConfig,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             SubTreeArity::to_usize() == 0,
             "Data slice must not have sub-tree layers"
@@ -482,7 +460,7 @@ impl<
         let row_count = get_merkle_tree_row_count(leafs, branches);
         let tree_len = get_merkle_tree_len(leafs, branches)?;
         ensure!(
-            tree_len == data.len() / E::byte_len(),
+            tree_len == data.len() / <A as Digest>::OutputSize::to_usize(),
             "Inconsistent tree data"
         );
 
@@ -502,7 +480,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -514,8 +491,8 @@ impl<
     /// leaf indexed / addressable in the same sequence that they are
     /// provided here.
     pub fn from_trees(
-        trees: Vec<MerkleTree<E, A, S, BaseTreeArity>>,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        trees: Vec<MerkleTree<A, S, BaseTreeArity>>,
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             SubTreeArity::to_usize() > 0,
             "Cannot use from_trees if not constructing a structure with sub-trees"
@@ -554,8 +531,8 @@ impl<
             // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
             let row_count = trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
-            let roots: Vec<E> = trees.iter().map(|x| x.root()).collect();
-            let root = A::default().multi_node(&roots, 1);
+            let roots = trees.iter().map(|x| x.root());
+            let root = A::new().multi_node(roots, 1);
 
             (leafs, len, row_count, root)
         };
@@ -567,7 +544,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -579,8 +555,8 @@ impl<
     /// significant, as trees are leaf indexed / addressable in the
     /// same sequence that they are provided here.
     pub fn from_sub_trees(
-        trees: Vec<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>>,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        trees: Vec<MerkleTree<A, S, BaseTreeArity, SubTreeArity>>,
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             TopTreeArity::to_usize() > 0,
             "Cannot use from_sub_trees if not constructing a structure with sub-trees"
@@ -612,8 +588,8 @@ impl<
             // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
             let row_count = trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
-            let roots: Vec<E> = trees.iter().map(|x| x.root()).collect();
-            let root = A::default().multi_node(&roots, 1);
+            let roots = trees.iter().map(|x| x.root());
+            let root = A::new().multi_node(roots, 1);
 
             (leafs, len, row_count, root)
         };
@@ -625,7 +601,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -638,8 +613,8 @@ impl<
     /// indexed / addressable in the same sequence that they are
     /// provided here.
     pub fn from_sub_trees_as_trees(
-        mut trees: Vec<MerkleTree<E, A, S, BaseTreeArity>>,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+        mut trees: Vec<MerkleTree<A, S, BaseTreeArity>>,
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         ensure!(
             TopTreeArity::to_usize() > 0,
             "Cannot use from_sub_trees if not constructing a structure with sub-trees"
@@ -669,7 +644,7 @@ impl<
         }
         grouped_trees.insert(0, trees);
 
-        let mut sub_trees: Vec<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>> =
+        let mut sub_trees: Vec<MerkleTree<A, S, BaseTreeArity, SubTreeArity>> =
             Vec::with_capacity(sub_tree_count);
         for group in grouped_trees {
             sub_trees.push(MerkleTree::from_trees(group)?);
@@ -683,8 +658,8 @@ impl<
             // Total row_count of the compound tree is the row_count of any of the sub-trees to top-layer plus root.
             let row_count = sub_trees[0].row_count() + 1;
             // Calculate the compound root by hashing the top layer roots together.
-            let roots: Vec<E> = sub_trees.iter().map(|x| x.root()).collect();
-            let root = A::default().multi_node(&roots, 1);
+            let roots = sub_trees.iter().map(|x| x.root());
+            let root = A::new().multi_node(roots, 1);
 
             (leafs, len, row_count, root)
         };
@@ -696,7 +671,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -710,10 +684,10 @@ impl<
     pub fn from_slices(
         tree_data: &[&[u8]],
         leafs: usize,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity>> {
         let mut trees = Vec::with_capacity(tree_data.len());
         for data in tree_data {
-            trees.push(MerkleTree::<E, A, S, BaseTreeArity>::from_tree_slice(
+            trees.push(MerkleTree::<A, S, BaseTreeArity>::from_tree_slice(
                 data, leafs,
             )?);
         }
@@ -730,11 +704,11 @@ impl<
         tree_data: &[&[u8]],
         leafs: usize,
         configs: &[StoreConfig],
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         let mut trees = Vec::with_capacity(tree_data.len());
         for i in 0..tree_data.len() {
             trees.push(
-                MerkleTree::<E, A, S, BaseTreeArity>::from_tree_slice_with_config(
+                MerkleTree::<A, S, BaseTreeArity>::from_tree_slice_with_config(
                     tree_data[i],
                     leafs,
                     configs[i].clone(),
@@ -753,10 +727,10 @@ impl<
     pub fn from_stores(
         leafs: usize,
         stores: Vec<S>,
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         let mut trees = Vec::with_capacity(stores.len());
         for store in stores {
-            trees.push(MerkleTree::<E, A, S, BaseTreeArity>::from_data_store(
+            trees.push(MerkleTree::<A, S, BaseTreeArity>::from_data_store(
                 store, leafs,
             )?);
         }
@@ -772,7 +746,7 @@ impl<
     pub fn from_store_configs(
         leafs: usize,
         configs: &[StoreConfig],
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         let branches = BaseTreeArity::to_usize();
         let mut trees = Vec::with_capacity(configs.len());
         for config in configs {
@@ -782,7 +756,7 @@ impl<
                 config.clone(),
             )
             .context("failed to create data store")?;
-            trees.push(MerkleTree::<E, A, S, BaseTreeArity>::from_data_store(
+            trees.push(MerkleTree::<A, S, BaseTreeArity>::from_data_store(
                 data, leafs,
             )?);
         }
@@ -799,7 +773,7 @@ impl<
     pub fn from_sub_tree_store_configs(
         leafs: usize,
         configs: &[StoreConfig],
-    ) -> Result<MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
+    ) -> Result<MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>> {
         let tree_count = TopTreeArity::to_usize();
 
         let mut start = 0;
@@ -808,7 +782,7 @@ impl<
         let mut trees = Vec::with_capacity(tree_count);
         for _ in 0..tree_count {
             trees.push(
-                MerkleTree::<E, A, S, BaseTreeArity, SubTreeArity>::from_store_configs(
+                MerkleTree::<A, S, BaseTreeArity, SubTreeArity>::from_store_configs(
                     leafs,
                     &configs[start..end],
                 )?,
@@ -822,10 +796,10 @@ impl<
 
     #[inline]
     fn build_partial_tree(
-        mut data: VecStore<E>,
+        mut data: VecStore<A::OutputSize>,
         leafs: usize,
         row_count: usize,
-    ) -> Result<MerkleTree<E, A, VecStore<E>, BaseTreeArity>> {
+    ) -> Result<MerkleTree<A, VecStore<A::OutputSize>, BaseTreeArity>> {
         let root = VecStore::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
         let branches = BaseTreeArity::to_usize();
 
@@ -844,7 +818,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -860,7 +833,7 @@ impl<
         i: usize,
         top_layer: bool,
         arity: usize,
-    ) -> Result<Proof<E, BaseTreeArity>> {
+    ) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         ensure!(arity != 0, "Invalid sub-tree arity");
 
         // Locate the sub-tree the leaf is contained in.
@@ -890,7 +863,7 @@ impl<
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
         let mut path: Vec<usize> = Vec::with_capacity(1); // path - 1
-        let mut lemma: Vec<E> = Vec::with_capacity(arity);
+        let mut lemma: Vec<_> = Vec::with_capacity(arity);
         for i in 0..arity {
             if i != tree_index {
                 lemma.push(if top_layer {
@@ -915,7 +888,7 @@ impl<
 
     /// Generate merkle tree inclusion proof for leaf `i`
     #[inline]
-    pub fn gen_proof(&self, i: usize) -> Result<Proof<E, BaseTreeArity>> {
+    pub fn gen_proof(&self, i: usize) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         match &self.data {
             Data::TopTree(_) => self.gen_sub_tree_proof(i, true, TopTreeArity::to_usize()),
             Data::SubTree(_) => self.gen_sub_tree_proof(i, false, SubTreeArity::to_usize()),
@@ -940,7 +913,7 @@ impl<
                 );
                 let shift = log2_pow2(branches);
 
-                let mut lemma: Vec<E> =
+                let mut lemma: Vec<_> =
                     Vec::with_capacity(get_merkle_proof_lemma_len(self.row_count, branches));
                 let mut path: Vec<usize> = Vec::with_capacity(self.row_count - 1); // path - 1
 
@@ -995,7 +968,7 @@ impl<
         &self,
         i: usize,
         rows_to_discard: Option<usize>,
-    ) -> Result<Proof<E, BaseTreeArity>> {
+    ) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid top-tree arity");
         ensure!(
             i < self.leafs,
@@ -1021,7 +994,7 @@ impl<
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
         let mut path: Vec<usize> = Vec::with_capacity(1); // path - 1
-        let mut lemma: Vec<E> = Vec::with_capacity(Arity::to_usize());
+        let mut lemma: Vec<_> = Vec::with_capacity(Arity::to_usize());
         for i in 0..Arity::to_usize() {
             if i != tree_index {
                 lemma.push(trees[i].root())
@@ -1043,7 +1016,7 @@ impl<
         &self,
         i: usize,
         rows_to_discard: Option<usize>,
-    ) -> Result<Proof<E, BaseTreeArity>> {
+    ) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         ensure!(Arity::to_usize() != 0, "Invalid sub-tree arity");
         ensure!(
             i < self.leafs,
@@ -1069,7 +1042,7 @@ impl<
         // Construct the top layer proof.  'lemma' length is
         // top_layer_nodes - 1 + root == top_layer_nodes
         let mut path: Vec<usize> = Vec::with_capacity(1); // path - 1
-        let mut lemma: Vec<E> = Vec::with_capacity(Arity::to_usize());
+        let mut lemma: Vec<_> = Vec::with_capacity(Arity::to_usize());
         for i in 0..Arity::to_usize() {
             if i != tree_index {
                 lemma.push(trees[i].root())
@@ -1098,7 +1071,7 @@ impl<
         &self,
         i: usize,
         rows_to_discard: Option<usize>,
-    ) -> Result<Proof<E, BaseTreeArity>> {
+    ) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         match &self.data {
             Data::TopTree(_) => self.gen_cached_top_tree_proof::<TopTreeArity>(i, rows_to_discard),
             Data::SubTree(_) => self.gen_cached_sub_tree_proof::<SubTreeArity>(i, rows_to_discard),
@@ -1161,7 +1134,7 @@ impl<
 
                 // Copy the proper segment of the base data into memory and
                 // initialize a VecStore to back a new, smaller MT.
-                let mut data_copy = vec![0; segment_width * E::byte_len()];
+                let mut data_copy = vec![0; segment_width * <A as Digest>::OutputSize::to_usize()];
                 ensure!(self.data.store().is_some(), "store data required");
 
                 self.data.store().unwrap().read_range_into(
@@ -1172,18 +1145,21 @@ impl<
                 let partial_store = VecStore::new_from_slice(segment_width, &data_copy)?;
                 ensure!(
                     Store::len(&partial_store) == segment_width,
-                    "Inconsistent store length"
+                    "Inconsistent store length: {} != {}",
+                    Store::len(&partial_store),
+                    segment_width,
                 );
 
                 // Before building the tree, resize the store where the tree
                 // will be built to allow space for the newly constructed layers.
                 data_copy.resize(
-                    get_merkle_tree_len(segment_width, branches)? * E::byte_len(),
+                    get_merkle_tree_len(segment_width, branches)?
+                        * <A as Digest>::OutputSize::to_usize(),
                     0,
                 );
 
                 // Build the optimally small tree.
-                let partial_tree: MerkleTree<E, A, VecStore<E>, BaseTreeArity> =
+                let partial_tree: MerkleTree<A, VecStore<A::OutputSize>, BaseTreeArity> =
                     Self::build_partial_tree(partial_store, segment_width, partial_row_count)?;
                 ensure!(
                     partial_row_count == partial_tree.row_count(),
@@ -1213,8 +1189,8 @@ impl<
         &self,
         i: usize,
         rows_to_discard: usize,
-        partial_tree: &MerkleTree<E, A, VecStore<E>, BaseTreeArity>,
-    ) -> Result<Proof<E, BaseTreeArity>> {
+        partial_tree: &MerkleTree<A, VecStore<A::OutputSize>, BaseTreeArity>,
+    ) -> Result<Proof<A::OutputSize, BaseTreeArity>> {
         ensure!(
             i < self.leafs,
             "{} is out of bounds (max: {})",
@@ -1275,7 +1251,7 @@ impl<
         // that we're currently processing in the partial tree.
         let mut partial_base = 0;
 
-        let mut lemma: Vec<E> =
+        let mut lemma: Vec<_> =
             Vec::with_capacity(get_merkle_proof_lemma_len(self.row_count, branches));
         let mut path: Vec<usize> = Vec::with_capacity(self.row_count - 1); // path - 1
 
@@ -1337,7 +1313,7 @@ impl<
 
     /// Returns merkle root
     #[inline]
-    pub fn root(&self) -> E {
+    pub fn root(&self) -> GenericArray<u8, A::OutputSize> {
         self.root.clone()
     }
 
@@ -1411,7 +1387,7 @@ impl<
 
     /// Returns merkle leaf at index i
     #[inline]
-    pub fn read_at(&self, i: usize) -> Result<E> {
+    pub fn read_at(&self, i: usize) -> Result<GenericArray<u8, A::OutputSize>> {
         match &self.data {
             Data::TopTree(sub_trees) => {
                 // Locate the top-layer tree the sub-tree leaf is contained in.
@@ -1450,11 +1426,22 @@ impl<
         }
     }
 
-    pub fn read_range(&self, start: usize, end: usize) -> Result<Vec<E>> {
+    pub fn read_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<GenericArray<u8, A::OutputSize>>> {
         ensure!(start < end, "start must be less than end");
         ensure!(self.data.store().is_some(), "store data required");
 
-        self.data.store().unwrap().read_range(start..end)
+        let mut out = vec![0u8; (end - start) * A::OutputSize::to_usize()];
+        self.read_range_into(start, end, &mut out)?;
+
+        Ok(out
+            .chunks_exact(A::OutputSize::to_usize())
+            .map(Into::into)
+            .cloned()
+            .collect())
     }
 
     pub fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
@@ -1474,13 +1461,13 @@ impl<
     /// Build the tree given a slice of all leafs, in bytes form.
     pub fn from_byte_slice_with_config(leafs: &[u8], config: StoreConfig) -> Result<Self> {
         ensure!(
-            leafs.len() % E::byte_len() == 0,
+            leafs.len() % <A as Digest>::OutputSize::to_usize() == 0,
             "{} ist not a multiple of {}",
             leafs.len(),
-            E::byte_len()
+            <A as Digest>::OutputSize::to_usize()
         );
 
-        let leafs_count = leafs.len() / E::byte_len();
+        let leafs_count = leafs.len() / <A as Digest>::OutputSize::to_usize();
         let branches = BaseTreeArity::to_usize();
         ensure!(leafs_count > 1, "not enough leaves");
         ensure!(
@@ -1506,7 +1493,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -1516,13 +1502,13 @@ impl<
     /// Build the tree given a slice of all leafs, in bytes form.
     pub fn from_byte_slice(leafs: &[u8]) -> Result<Self> {
         ensure!(
-            leafs.len() % E::byte_len() == 0,
+            leafs.len() % <A as Digest>::OutputSize::to_usize() == 0,
             "{} is not a multiple of {}",
             leafs.len(),
-            E::byte_len()
+            <A as Digest>::OutputSize::to_usize()
         );
 
-        let leafs_count = leafs.len() / E::byte_len();
+        let leafs_count = leafs.len() / <A as Digest>::OutputSize::to_usize();
         let branches = BaseTreeArity::to_usize();
         ensure!(leafs_count > 1, "not enough leaves");
         ensure!(
@@ -1548,7 +1534,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -1556,37 +1541,37 @@ impl<
     }
 }
 
-pub trait FromIndexedParallelIterator<E, BaseTreeArity>: Sized
+pub trait FromIndexedParallelIterator<K, BaseTreeArity>: Sized
 where
-    E: Send,
+    K: Send + AsRef<[u8]>,
 {
     fn from_par_iter<I>(par_iter: I) -> Result<Self>
     where
         BaseTreeArity: Unsigned,
-        I: IntoParallelIterator<Item = E>,
+        I: IntoParallelIterator<Item = K>,
         I::Iter: IndexedParallelIterator;
 
     fn from_par_iter_with_config<I>(par_iter: I, config: StoreConfig) -> Result<Self>
     where
-        I: IntoParallelIterator<Item = E>,
+        I: IntoParallelIterator<Item = K>,
         I::Iter: IndexedParallelIterator,
         BaseTreeArity: Unsigned;
 }
 
 impl<
-        E: Element,
-        A: Algorithm<E>,
-        S: Store<E>,
+        A: Algorithm,
+        S: Store<A::OutputSize>,
         BaseTreeArity: Unsigned,
         SubTreeArity: Unsigned,
         TopTreeArity: Unsigned,
-    > FromIndexedParallelIterator<E, BaseTreeArity>
-    for MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+        K: AsRef<[u8]> + Send,
+    > FromIndexedParallelIterator<K, BaseTreeArity>
+    for MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     /// Creates new merkle tree from an iterator over hashable objects.
     fn from_par_iter<I>(into: I) -> Result<Self>
     where
-        I: IntoParallelIterator<Item = E>,
+        I: IntoParallelIterator<Item = K>,
         I::Iter: IndexedParallelIterator,
     {
         let iter = into.into_par_iter();
@@ -1605,7 +1590,7 @@ impl<
 
         let mut data = S::new(size).expect("failed to create data store");
 
-        populate_data_par::<E, A, S, BaseTreeArity, _>(&mut data, iter)?;
+        populate_data_par::<A, S, BaseTreeArity, _, _>(&mut data, iter)?;
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
 
         Ok(MerkleTree {
@@ -1615,7 +1600,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -1626,7 +1610,7 @@ impl<
     fn from_par_iter_with_config<I>(into: I, config: StoreConfig) -> Result<Self>
     where
         BaseTreeArity: Unsigned,
-        I: IntoParallelIterator<Item = E>,
+        I: IntoParallelIterator<Item = K>,
         I::Iter: IndexedParallelIterator,
     {
         let iter = into.into_par_iter();
@@ -1658,14 +1642,13 @@ impl<
                 row_count,
                 root,
                 _a: PhantomData,
-                _e: PhantomData,
                 _bta: PhantomData,
                 _sta: PhantomData,
                 _tta: PhantomData,
             });
         }
 
-        populate_data_par::<E, A, S, BaseTreeArity, _>(&mut data, iter)?;
+        populate_data_par::<A, S, BaseTreeArity, _, _>(&mut data, iter)?;
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, Some(config))?;
 
         Ok(MerkleTree {
@@ -1675,7 +1658,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -1684,18 +1666,19 @@ impl<
 }
 
 impl<
-        E: Element,
-        A: Algorithm<E>,
-        S: Store<E>,
+        A: Algorithm,
+        S: Store<A::OutputSize>,
         BaseTreeArity: Unsigned,
         SubTreeArity: Unsigned,
         TopTreeArity: Unsigned,
-    > MerkleTree<E, A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
+    > MerkleTree<A, S, BaseTreeArity, SubTreeArity, TopTreeArity>
 {
     /// Attempts to create a new merkle tree using hashable objects yielded by
     /// the provided iterator. This method returns the first error yielded by
     /// the iterator, if the iterator yielded an error.
-    pub fn try_from_iter<I: IntoIterator<Item = Result<E>>>(into: I) -> Result<Self> {
+    pub fn try_from_iter<I: IntoIterator<Item = Result<impl AsRef<[u8]>>>>(
+        into: I,
+    ) -> Result<Self> {
         let iter = into.into_iter();
 
         let (_, n) = iter.size_hint();
@@ -1712,7 +1695,7 @@ impl<
         let row_count = get_merkle_tree_row_count(leafs, branches);
 
         let mut data = S::new(size).context("failed to create data store")?;
-        populate_data::<E, A, S, BaseTreeArity, I>(&mut data, iter)
+        populate_data::<A, S, BaseTreeArity, _, I>(&mut data, iter)
             .context("failed to populate data")?;
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
 
@@ -1723,7 +1706,6 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
@@ -1733,7 +1715,7 @@ impl<
     /// Attempts to create a new merkle tree using hashable objects yielded by
     /// the provided iterator and store config. This method returns the first
     /// error yielded by the iterator, if the iterator yielded an error.
-    pub fn try_from_iter_with_config<I: IntoIterator<Item = Result<E>>>(
+    pub fn try_from_iter_with_config<I: IntoIterator<Item = Result<impl AsRef<[u8]>>>>(
         into: I,
         config: StoreConfig,
     ) -> Result<Self> {
@@ -1767,14 +1749,13 @@ impl<
                 row_count,
                 root,
                 _a: PhantomData,
-                _e: PhantomData,
                 _bta: PhantomData,
                 _sta: PhantomData,
                 _tta: PhantomData,
             });
         }
 
-        populate_data::<E, A, S, BaseTreeArity, I>(&mut data, iter)
+        populate_data::<A, S, BaseTreeArity, _, I>(&mut data, iter)
             .expect("failed to populate data");
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, Some(config))?;
 
@@ -1785,28 +1766,10 @@ impl<
             row_count,
             root,
             _a: PhantomData,
-            _e: PhantomData,
             _bta: PhantomData,
             _sta: PhantomData,
             _tta: PhantomData,
         })
-    }
-}
-
-impl Element for [u8; 32] {
-    fn byte_len() -> usize {
-        32
-    }
-
-    fn from_slice(bytes: &[u8]) -> Self {
-        if bytes.len() != 32 {
-            panic!("invalid length {}, expected 32", bytes.len());
-        }
-        *array_ref!(bytes, 0, 32)
-    }
-
-    fn copy_to_slice(&self, bytes: &mut [u8]) {
-        bytes.copy_from_slice(self);
     }
 }
 
@@ -1959,11 +1922,11 @@ pub fn log2_pow2(n: usize) -> usize {
 }
 
 pub fn populate_data<
-    E: Element,
-    A: Algorithm<E>,
-    S: Store<E>,
+    A: Algorithm,
+    S: Store<A::OutputSize>,
     BaseTreeArity: Unsigned,
-    I: IntoIterator<Item = Result<E>>,
+    K: AsRef<[u8]>,
+    I: IntoIterator<Item = Result<K>>,
 >(
     data: &mut S,
     iter: <I as std::iter::IntoIterator>::IntoIter,
@@ -1972,9 +1935,9 @@ pub fn populate_data<
         return Ok(());
     }
 
-    let mut buf = Vec::with_capacity(BUILD_DATA_BLOCK_SIZE * E::byte_len());
+    let mut buf = Vec::with_capacity(BUILD_DATA_BLOCK_SIZE * <A as Digest>::OutputSize::to_usize());
 
-    let mut a = A::default();
+    let mut a = A::new();
     for item in iter {
         // short circuit the tree-populating routine if the iterator yields an
         // error
@@ -1982,7 +1945,7 @@ pub fn populate_data<
 
         a.reset();
         buf.extend(a.leaf(item).as_ref());
-        if buf.len() >= BUILD_DATA_BLOCK_SIZE * E::byte_len() {
+        if buf.len() >= BUILD_DATA_BLOCK_SIZE * <A as Digest>::OutputSize::to_usize() {
             let data_len = data.len();
             // FIXME: Integrate into `len()` call into `copy_from_slice`
             // once we update to `stable` 1.36.
@@ -1997,13 +1960,13 @@ pub fn populate_data<
     Ok(())
 }
 
-fn populate_data_par<E, A, S, BaseTreeArity, I>(data: &mut S, iter: I) -> Result<()>
+fn populate_data_par<A, S, BaseTreeArity, K, I>(data: &mut S, iter: I) -> Result<()>
 where
-    E: Element,
-    A: Algorithm<E>,
-    S: Store<E>,
+    A: Algorithm,
+    S: Store<A::OutputSize>,
     BaseTreeArity: Unsigned,
-    I: ParallelIterator<Item = E> + IndexedParallelIterator,
+    K: AsRef<[u8]> + Send,
+    I: ParallelIterator<Item = K> + IndexedParallelIterator,
 {
     if !data.is_empty() {
         return Ok(());
@@ -2014,8 +1977,9 @@ where
     iter.chunks(BUILD_DATA_BLOCK_SIZE)
         .enumerate()
         .try_for_each(|(index, chunk)| {
-            let mut a = A::default();
-            let mut buf = Vec::with_capacity(BUILD_DATA_BLOCK_SIZE * E::byte_len());
+            let mut a = A::new();
+            let mut buf =
+                Vec::with_capacity(BUILD_DATA_BLOCK_SIZE * <A as Digest>::OutputSize::to_usize());
 
             for item in chunk {
                 a.reset();

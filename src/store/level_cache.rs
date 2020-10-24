@@ -2,12 +2,11 @@ use std::fmt;
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{copy, Read, Seek, SeekFrom};
 use std::iter::FromIterator;
-use std::marker::PhantomData;
-use std::ops;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use generic_array::GenericArray;
 use memmap::MmapOptions;
 use positioned_io::{ReadAt, WriteAt};
 use rayon::iter::*;
@@ -15,10 +14,9 @@ use rayon::prelude::*;
 use tempfile::tempfile;
 use typenum::marker_traits::Unsigned;
 
-use crate::hash::Algorithm;
+use crate::hash::{Algorithm, ArrayLength, ArrayLengthMarker};
 use crate::merkle::{
     get_merkle_tree_cache_size, get_merkle_tree_leafs, get_merkle_tree_len, log2_pow2, next_pow2,
-    Element,
 };
 use crate::store::{ExternalReader, Store, StoreConfig, BUILD_CHUNK_NODES};
 
@@ -30,9 +28,8 @@ use crate::store::{ExternalReader, Store, StoreConfig, BUILD_CHUNK_NODES};
 /// disk file size based on that number of levels, so on-disk files
 /// are tied, structurally to the configuration they were built with
 /// and can only be accessed with the same number of levels.
-pub struct LevelCacheStore<E: Element, R: Read + Send + Sync> {
+pub struct LevelCacheStore<N: ArrayLength, R: Read + Send + Sync> {
     len: usize,
-    elem_len: usize,
     file: File,
 
     // The number of base layer data items.
@@ -54,14 +51,13 @@ pub struct LevelCacheStore<E: Element, R: Read + Send + Sync> {
     // layer data.
     reader: Option<ExternalReader<R>>,
 
-    _e: PhantomData<E>,
+    _n: ArrayLengthMarker<N>,
 }
 
-impl<E: Element, R: Read + Send + Sync> fmt::Debug for LevelCacheStore<E, R> {
+impl<N: ArrayLength, R: Read + Send + Sync> fmt::Debug for LevelCacheStore<N, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LevelCacheStore")
             .field("len", &self.len)
-            .field("elem_len", &self.len)
             .field("data_width", &self.data_width)
             .field("loaded_from_disk", &self.loaded_from_disk)
             .field("cache_index_start", &self.cache_index_start)
@@ -70,7 +66,7 @@ impl<E: Element, R: Read + Send + Sync> fmt::Debug for LevelCacheStore<E, R> {
     }
 }
 
-impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
+impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
     /// Used for opening v2 compacted DiskStores.
     pub fn new_from_disk_with_reader(
         store_range: usize,
@@ -96,13 +92,13 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
 
         // Values below in bytes.
         // Convert store_range from an element count to bytes.
-        let store_range = store_range * E::byte_len();
+        let store_range = store_range * N::to_usize();
 
         // LevelCacheStore on disk file is only the cached data, so
         // the file size dictates the cache_size.  Calculate cache
         // start and the updated size with repect to the file size.
         let cache_size =
-            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * N::to_usize();
         let cache_index_start = store_range - cache_size;
 
         // Sanity checks that the StoreConfig rows_to_discard matches this
@@ -117,15 +113,14 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         );
 
         Ok(LevelCacheStore {
-            len: store_range / E::byte_len(),
-            elem_len: E::byte_len(),
+            len: store_range / N::to_usize(),
             file,
             data_width: size,
             cache_index_start,
             store_size,
             loaded_from_disk: false,
             reader: Some(reader),
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
@@ -136,7 +131,7 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
     }
 }
 
-impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
+impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
     fn new_with_config(size: usize, branches: usize, config: StoreConfig) -> Result<Self> {
         let data_path = StoreConfig::data_path(&config.path, &config.id);
 
@@ -154,7 +149,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
             .create_new(true)
             .open(data_path)?;
 
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
         let leafs = get_merkle_tree_leafs(size, branches)?;
 
         ensure!(
@@ -165,39 +160,37 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // Calculate cache start and the updated size with repect to
         // the data size.
         let cache_size =
-            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * E::byte_len();
+            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * N::to_usize();
         let cache_index_start = store_size - cache_size;
 
         file.set_len(store_size as u64)?;
 
         Ok(LevelCacheStore {
             len: 0,
-            elem_len: E::byte_len(),
             file,
             data_width: leafs,
             cache_index_start,
             store_size,
             loaded_from_disk: false,
             reader: None,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
     fn new(size: usize) -> Result<Self> {
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
         let file = tempfile()?;
         file.set_len(store_size as u64)?;
 
         Ok(LevelCacheStore {
             len: 0,
-            elem_len: E::byte_len(),
             file,
             data_width: size,
             cache_index_start: 0,
             store_size,
             loaded_from_disk: false,
             reader: None,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
@@ -208,9 +201,9 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         config: StoreConfig,
     ) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new_with_config(size, branches, config)?;
@@ -221,7 +214,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // already correct).
         if !store.loaded_from_disk {
             store.store_copy_from_slice(0, data)?;
-            store.len = data.len() / store.elem_len;
+            store.len = data.len() / N::to_usize();
         }
 
         Ok(store)
@@ -229,14 +222,14 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
 
     fn new_from_slice(size: usize, data: &[u8]) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new(size)?;
         store.store_copy_from_slice(0, data)?;
-        store.len = data.len() / store.elem_len;
+        store.len = data.len() / N::to_usize();
 
         Ok(store)
     }
@@ -261,12 +254,12 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
 
         // Values below in bytes.
         // Convert store_range from an element count to bytes.
-        let store_range = store_range * E::byte_len();
+        let store_range = store_range * N::to_usize();
 
         // Calculate cache start and the updated size with repect to
         // the data size.
         let cache_size =
-            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * N::to_usize();
         let cache_index_start = store_range - cache_size;
 
         // For a true v1 compatible store, this check should remain,
@@ -278,26 +271,25 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // particular on-disk file.
         /*
         ensure!(
-            store_size == size * E::byte_len() + cache_size,
+            store_size == size * N::to_usize() + cache_size,
             "Inconsistent store size detected"
         );
          */
 
         Ok(LevelCacheStore {
-            len: store_range / E::byte_len(),
-            elem_len: E::byte_len(),
+            len: store_range / N::to_usize(),
             file,
             data_width: size,
             cache_index_start,
             loaded_from_disk: true,
             store_size,
             reader: None,
-            _e: Default::default(),
+            _n: Default::default(),
         })
     }
 
-    fn write_at(&mut self, el: E, index: usize) -> Result<()> {
-        self.store_copy_from_slice(index * self.elem_len, el.as_ref())?;
+    fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
+        self.store_copy_from_slice(index * N::to_usize(), el.as_ref())?;
         self.len = std::cmp::max(self.len, index + 1);
 
         Ok(())
@@ -305,40 +297,42 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
 
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) -> Result<()> {
         ensure!(
-            buf.len() % self.elem_len == 0,
+            buf.len() % N::to_usize() == 0,
             "buf size must be a multiple of {}",
-            self.elem_len
+            N::to_usize()
         );
-        self.store_copy_from_slice(start * self.elem_len, buf)?;
-        self.len = std::cmp::max(self.len, start + buf.len() / self.elem_len);
+        self.store_copy_from_slice(start * N::to_usize(), buf)?;
+        self.len = std::cmp::max(self.len, start + buf.len() / N::to_usize());
 
         Ok(())
     }
 
-    fn read_at(&self, index: usize) -> Result<E> {
-        let start = index * self.elem_len;
-        let end = start + self.elem_len;
+    fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>> {
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
+            start <= self.data_width * N::to_usize() || start >= self.cache_index_start,
             "out of bounds"
         );
 
-        Ok(E::from_slice(&self.store_read_range(start, end)?))
+        let mut out = GenericArray::default();
+        self.store_read_into(start, end, &mut out)?;
+        Ok(out)
     }
 
     fn read_into(&self, index: usize, buf: &mut [u8]) -> Result<()> {
-        let start = index * self.elem_len;
-        let end = start + self.elem_len;
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
+            start <= self.data_width * N::to_usize() || start >= self.cache_index_start,
             "out of bounds"
         );
 
@@ -346,37 +340,18 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
     }
 
     fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
-        let start = start * self.elem_len;
-        let end = end * self.elem_len;
+        let start = start * N::to_usize();
+        let end = end * N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
+            start <= self.data_width * N::to_usize() || start >= self.cache_index_start,
             "out of bounds"
         );
 
         self.store_read_into(start, end, buf)
-    }
-
-    fn read_range(&self, r: ops::Range<usize>) -> Result<Vec<E>> {
-        let start = r.start * self.elem_len;
-        let end = r.end * self.elem_len;
-
-        let len = self.len * self.elem_len;
-        ensure!(start < len, "start out of range {} >= {}", start, len);
-        ensure!(end <= len, "end out of range {} > {}", end, len);
-        ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
-            "out of bounds"
-        );
-
-        Ok(self
-            .store_read_range(start, end)?
-            .chunks(self.elem_len)
-            .map(E::from_slice)
-            .collect())
     }
 
     fn len(&self) -> usize {
@@ -405,17 +380,17 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         self.len == 0
     }
 
-    fn push(&mut self, el: E) -> Result<()> {
+    fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
         let len = self.len;
         ensure!(
-            (len + 1) * self.elem_len <= self.store_size(),
+            (len + 1) * N::to_usize() <= self.store_size(),
             "not enough space, len: {}, E size {}, store len {}",
             len,
-            self.elem_len,
+            N::to_usize(),
             self.store_size()
         );
 
-        self.write_at(el, len)
+        self.write_at(el.into(), len)
     }
 
     fn sync(&self) -> Result<()> {
@@ -423,7 +398,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
     }
 
     #[allow(unsafe_code)]
-    fn process_layer<A: Algorithm<E>, U: Unsigned>(
+    fn process_layer<A: Algorithm, U: Unsigned>(
         &mut self,
         width: usize,
         level: usize,
@@ -435,15 +410,15 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         let mut mmap = unsafe {
             let mut mmap_options = MmapOptions::new();
             mmap_options
-                .offset((write_start * E::byte_len()) as u64)
-                .len(width * E::byte_len())
+                .offset((write_start * N::to_usize()) as u64)
+                .len(width * N::to_usize())
                 .map_mut(&self.file)
         }?;
 
         let data_lock = Arc::new(RwLock::new(self));
         let branches = U::to_usize();
         let shift = log2_pow2(branches);
-        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * E::byte_len();
+        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * N::to_usize();
 
         ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
         Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
@@ -453,18 +428,21 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
                 let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                 let chunk_nodes = {
+                    let mut chunk_nodes = vec![0u8; chunk_size * N::to_usize()];
                     // Read everything taking the lock once.
-                    data_lock
-                        .read()
-                        .unwrap()
-                        .read_range_internal(chunk_index..chunk_index + chunk_size)?
+                    data_lock.read().unwrap().read_range_into(
+                        chunk_index,
+                        chunk_index + chunk_size,
+                        &mut chunk_nodes,
+                    )?;
+                    chunk_nodes
                 };
 
-                let nodes_size = (chunk_nodes.len() / branches) * E::byte_len();
-                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches).fold(
+                let nodes_size = (chunk_nodes.len() / branches) * N::to_usize();
+                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches * N::to_usize()).fold(
                     Vec::with_capacity(nodes_size),
                     |mut acc, nodes| {
-                        let h = A::default().multi_node(&nodes, level);
+                        let h = A::new().multi_node(nodes.chunks(N::to_usize()), level);
                         acc.extend_from_slice(h.as_ref());
                         acc
                     },
@@ -473,7 +451,7 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
                 // Check that we correctly pre-allocated the space.
                 let hashed_nodes_as_bytes_len = hashed_nodes_as_bytes.len();
                 ensure!(
-                    hashed_nodes_as_bytes.len() == chunk_size / branches * E::byte_len(),
+                    hashed_nodes_as_bytes.len() == chunk_size / branches * N::to_usize(),
                     "Invalid hashed node length"
                 );
 
@@ -484,12 +462,12 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
     }
 
     // LevelCacheStore specific merkle-tree build.
-    fn build<A: Algorithm<E>, U: Unsigned>(
+    fn build<A: Algorithm, U: Unsigned>(
         &mut self,
         leafs: usize,
         row_count: usize,
         config: Option<StoreConfig>,
-    ) -> Result<E> {
+    ) -> Result<GenericArray<u8, N>> {
         let branches = U::to_usize();
         ensure!(
             next_pow2(branches) == branches,
@@ -566,11 +544,11 @@ impl<E: Element, R: Read + Send + Sync> Store<E> for LevelCacheStore<E, R> {
         // we've just built a store that says that it has the full
         // length of elements, when in fact only the cached portion is
         // on disk.
-        self.read_at_internal(self.len() - cache_index_start - 1)
+        self.read_at(self.len() - cache_index_start - 1)
     }
 }
 
-impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
+impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
     pub fn set_len(&mut self, len: usize) {
         self.len = len;
     }
@@ -579,7 +557,7 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
     pub fn front_truncate(&mut self, config: &StoreConfig, len: usize) -> Result<()> {
         let metadata = self.file.metadata()?;
         let store_size = metadata.len();
-        let len = (len * E::byte_len()) as u64;
+        let len = (len * N::to_usize()) as u64;
 
         ensure!(store_size >= len, "Invalid truncation length");
 
@@ -635,11 +613,11 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         // Calculate cache start and the updated size with repect to
         // the data size.
         let cache_size =
-            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * N::to_usize();
 
         // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.
-        Ok(store_size == size * E::byte_len() + cache_size)
+        Ok(store_size == size * N::to_usize() + cache_size)
     }
 
     // Note that v2 is now the default compaction mode, so this isn't a versioned call.
@@ -669,7 +647,7 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         // the file size dictates the cache_size.  Calculate cache
         // start and the updated size with repect to the file size.
         let cache_size =
-            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * E::byte_len();
+            get_merkle_tree_cache_size(size, branches, config.rows_to_discard)? * N::to_usize();
 
         // Sanity checks that the StoreConfig rows_to_discard matches this
         // particular on-disk file.  Since an external reader *is*
@@ -678,120 +656,14 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
         Ok(store_size == cache_size)
     }
 
-    pub fn store_read_range(&self, start: usize, end: usize) -> Result<Vec<u8>> {
-        let read_len = end - start;
-        let mut read_data = vec![0; read_len];
-        let mut adjusted_start = start;
-
-        ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
-            "out of bounds"
-        );
-
-        // If an external reader was specified for the base layer, use it.
-        if start < self.data_width * self.elem_len && self.reader.is_some() {
-            self.reader
-                .as_ref()
-                .unwrap()
-                .read(start, end, &mut read_data)
-                .with_context(|| {
-                    format!(
-                        "failed to read {} bytes from file at offset {}",
-                        end - start,
-                        start
-                    )
-                })?;
-
-            return Ok(read_data);
-        }
-
-        // Adjust read index if in the cached ranged to be shifted
-        // over since the data stored is compacted.
-        if start >= self.cache_index_start {
-            let v1 = self.reader.is_none();
-            adjusted_start = if v1 {
-                start - self.cache_index_start + (self.data_width * self.elem_len)
-            } else {
-                start - self.cache_index_start
-            };
-        }
-
-        self.file
-            .read_exact_at(adjusted_start as u64, &mut read_data)
-            .with_context(|| {
-                format!(
-                    "failed to read {} bytes from file at offset {}",
-                    read_len, start
-                )
-            })?;
-
-        Ok(read_data)
-    }
-
-    // This read is for internal use only during the 'build' process.
-    fn store_read_range_internal(&self, start: usize, end: usize) -> Result<Vec<u8>> {
-        let read_len = end - start;
-        let mut read_data = vec![0; read_len];
-
-        ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
-            "out of bounds"
-        );
-
-        self.file
-            .read_exact_at(start as u64, &mut read_data)
-            .with_context(|| {
-                format!(
-                    "failed to read {} bytes from file at offset {}",
-                    read_len, start
-                )
-            })?;
-
-        Ok(read_data)
-    }
-
-    fn read_range_internal(&self, r: ops::Range<usize>) -> Result<Vec<E>> {
-        let start = r.start * self.elem_len;
-        let end = r.end * self.elem_len;
-
-        let len = self.len * self.elem_len;
-        ensure!(start < len, "start out of range {} >= {}", start, len);
-        ensure!(end <= len, "end out of range {} > {}", end, len);
-        ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
-            "out of bounds"
-        );
-
-        Ok(self
-            .store_read_range_internal(start, end)?
-            .chunks(self.elem_len)
-            .map(E::from_slice)
-            .collect())
-    }
-
-    fn read_at_internal(&self, index: usize) -> Result<E> {
-        let start = index * self.elem_len;
-        let end = start + self.elem_len;
-
-        let len = self.len * self.elem_len;
-        ensure!(start < len, "start out of range {} >= {}", start, len);
-        ensure!(end <= len, "end out of range {} > {}", end, len);
-        ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
-            "out of bounds"
-        );
-
-        Ok(E::from_slice(&self.store_read_range_internal(start, end)?))
-    }
-
     pub fn store_read_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
         ensure!(
-            start <= self.data_width * self.elem_len || start >= self.cache_index_start,
+            start <= self.data_width * N::to_usize() || start >= self.cache_index_start,
             "Invalid read start"
         );
 
         // If an external reader was specified for the base layer, use it.
-        if start < self.data_width * self.elem_len && self.reader.is_some() {
+        if start < self.data_width * N::to_usize() && self.reader.is_some() {
             self.reader
                 .as_ref()
                 .unwrap()
@@ -809,7 +681,7 @@ impl<E: Element, R: Read + Send + Sync> LevelCacheStore<E, R> {
             let adjusted_start = if start >= self.cache_index_start {
                 if self.reader.is_none() {
                     // if v1
-                    start - self.cache_index_start + (self.data_width * self.elem_len)
+                    start - self.cache_index_start + (self.data_width * N::to_usize())
                 } else {
                     start - self.cache_index_start
                 }

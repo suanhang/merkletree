@@ -1,12 +1,11 @@
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{copy, Seek, SeekFrom};
 use std::iter::FromIterator;
-use std::marker::PhantomData;
-use std::ops;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use generic_array::GenericArray;
 use memmap::MmapOptions;
 use positioned_io::{ReadAt, WriteAt};
 use rayon::iter::*;
@@ -14,10 +13,9 @@ use rayon::prelude::*;
 use tempfile::tempfile;
 use typenum::marker_traits::Unsigned;
 
-use crate::hash::Algorithm;
+use crate::hash::{Algorithm, ArrayLength, ArrayLengthMarker};
 use crate::merkle::{
     get_merkle_tree_cache_size, get_merkle_tree_leafs, get_merkle_tree_len, log2_pow2, next_pow2,
-    Element,
 };
 use crate::store::{Store, StoreConfig, StoreConfigDataVersion, BUILD_CHUNK_NODES};
 
@@ -25,10 +23,8 @@ use crate::store::{Store, StoreConfig, StoreConfigDataVersion, BUILD_CHUNK_NODES
 /// cost of build time performance. Most of its I/O logic is in the
 /// `store_copy_from_slice` and `store_read_range` functions.
 #[derive(Debug)]
-pub struct DiskStore<E: Element> {
+pub struct DiskStore<N: ArrayLength> {
     len: usize,
-    elem_len: usize,
-    _e: PhantomData<E>,
     file: File,
 
     // This flag is useful only immediate after instantiation, which
@@ -40,9 +36,11 @@ pub struct DiskStore<E: Element> {
     // Not to be confused with `len`, this saves the total size of the `store`
     // in bytes and the other one keeps track of used `E` slots in the `DiskStore`.
     store_size: usize,
+
+    _n: ArrayLengthMarker<N>,
 }
 
-impl<E: Element> Store<E> for DiskStore<E> {
+impl<N: ArrayLength> Store<N> for DiskStore<N> {
     fn new_with_config(size: usize, branches: usize, config: StoreConfig) -> Result<Self> {
         let data_path = StoreConfig::data_path(&config.path, &config.id);
 
@@ -58,31 +56,29 @@ impl<E: Element> Store<E> for DiskStore<E> {
             .create_new(true)
             .open(data_path)?;
 
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
         file.set_len(store_size as u64)?;
 
         Ok(DiskStore {
             len: 0,
-            elem_len: E::byte_len(),
-            _e: Default::default(),
             file,
             loaded_from_disk: false,
             store_size,
+            _n: Default::default(),
         })
     }
 
     fn new(size: usize) -> Result<Self> {
-        let store_size = E::byte_len() * size;
+        let store_size = N::to_usize() * size;
         let file = tempfile()?;
         file.set_len(store_size as u64)?;
 
         Ok(DiskStore {
             len: 0,
-            elem_len: E::byte_len(),
-            _e: Default::default(),
             file,
             loaded_from_disk: false,
             store_size,
+            _n: Default::default(),
         })
     }
 
@@ -93,9 +89,9 @@ impl<E: Element> Store<E> for DiskStore<E> {
         config: StoreConfig,
     ) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new_with_config(size, branches, config)?;
@@ -106,7 +102,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
         // already correct).
         if !store.loaded_from_disk {
             store.store_copy_from_slice(0, data)?;
-            store.len = data.len() / store.elem_len;
+            store.len = data.len() / N::to_usize();
         }
 
         Ok(store)
@@ -114,14 +110,14 @@ impl<E: Element> Store<E> for DiskStore<E> {
 
     fn new_from_slice(size: usize, data: &[u8]) -> Result<Self> {
         ensure!(
-            data.len() % E::byte_len() == 0,
+            data.len() % N::to_usize() == 0,
             "data size must be a multiple of {}",
-            E::byte_len()
+            N::to_usize()
         );
 
         let mut store = Self::new(size)?;
         store.store_copy_from_slice(0, data)?;
-        store.len = data.len() / store.elem_len;
+        store.len = data.len() / N::to_usize();
 
         Ok(store)
     }
@@ -135,56 +131,58 @@ impl<E: Element> Store<E> for DiskStore<E> {
 
         // Sanity check.
         ensure!(
-            store_size == size * E::byte_len(),
+            store_size == size * N::to_usize(),
             "Invalid formatted file provided. Expected {} bytes, found {} bytes",
-            size * E::byte_len(),
+            size * N::to_usize(),
             store_size
         );
 
         Ok(DiskStore {
             len: size,
-            elem_len: E::byte_len(),
-            _e: Default::default(),
             file,
             loaded_from_disk: true,
             store_size,
+            _n: Default::default(),
         })
     }
 
-    fn write_at(&mut self, el: E, index: usize) -> Result<()> {
-        self.store_copy_from_slice(index * self.elem_len, el.as_ref())?;
+    fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
+        self.store_copy_from_slice(index * N::to_usize(), el.as_ref())?;
         self.len = std::cmp::max(self.len, index + 1);
         Ok(())
     }
 
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) -> Result<()> {
         ensure!(
-            buf.len() % self.elem_len == 0,
+            buf.len() % N::to_usize() == 0,
             "buf size must be a multiple of {}",
-            self.elem_len
+            N::to_usize()
         );
-        self.store_copy_from_slice(start * self.elem_len, buf)?;
-        self.len = std::cmp::max(self.len, start + buf.len() / self.elem_len);
+        self.store_copy_from_slice(start * N::to_usize(), buf)?;
+        self.len = std::cmp::max(self.len, start + buf.len() / N::to_usize());
 
         Ok(())
     }
 
-    fn read_at(&self, index: usize) -> Result<E> {
-        let start = index * self.elem_len;
-        let end = start + self.elem_len;
+    fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>> {
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        Ok(E::from_slice(&self.store_read_range(start, end)?))
+        let mut out = GenericArray::default();
+        self.store_read_into(start, end, &mut out)?;
+
+        Ok(out)
     }
 
     fn read_into(&self, index: usize, buf: &mut [u8]) -> Result<()> {
-        let start = index * self.elem_len;
-        let end = start + self.elem_len;
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
@@ -192,29 +190,14 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
-        let start = start * self.elem_len;
-        let end = end * self.elem_len;
+        let start = start * N::to_usize();
+        let end = end * N::to_usize();
 
-        let len = self.len * self.elem_len;
+        let len = self.len * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
         self.store_read_into(start, end, buf)
-    }
-
-    fn read_range(&self, r: ops::Range<usize>) -> Result<Vec<E>> {
-        let start = r.start * self.elem_len;
-        let end = r.end * self.elem_len;
-
-        let len = self.len * self.elem_len;
-        ensure!(start < len, "start out of range {} >= {}", start, len);
-        ensure!(end <= len, "end out of range {} > {}", end, len);
-
-        Ok(self
-            .store_read_range(start, end)?
-            .chunks(self.elem_len)
-            .map(E::from_slice)
-            .collect())
     }
 
     fn len(&self) -> usize {
@@ -236,12 +219,12 @@ impl<E: Element> Store<E> for DiskStore<E> {
     ) -> Result<bool> {
         // Determine how many base layer leafs there are (and in bytes).
         let leafs = get_merkle_tree_leafs(self.len, branches)?;
-        let data_width = leafs * self.elem_len;
+        let data_width = leafs * N::to_usize();
 
         // Calculate how large the cache should be (based on the
         // config.rows_to_discard param).
         let cache_size =
-            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * self.elem_len;
+            get_merkle_tree_cache_size(leafs, branches, config.rows_to_discard)? * N::to_usize();
 
         // The file cannot be compacted if the specified configuration
         // requires either 1) nothing to be cached, or 2) everything
@@ -250,7 +233,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
         // calling this method.  To resolve, provide a sane
         // configuration.
         ensure!(
-            cache_size < self.len * self.elem_len && cache_size != 0,
+            cache_size < self.len * N::to_usize() && cache_size != 0,
             "Cannot compact with this configuration"
         );
 
@@ -284,14 +267,14 @@ impl<E: Element> Store<E> for DiskStore<E> {
             // followed by the cached data.
             self.file.set_len((data_width + cache_size) as u64)?;
             // Adjust our length for internal consistency.
-            self.len = (data_width + cache_size) / self.elem_len;
+            self.len = (data_width + cache_size) / N::to_usize();
         } else {
             // Truncate the data on-disk to be only the cached data.
             self.file.set_len(cache_size as u64)?;
 
             // Adjust our length to be the cached elements only for
             // internal consistency.
-            self.len = cache_size / self.elem_len;
+            self.len = cache_size / N::to_usize();
         }
 
         // Sync and sanity check that we match on disk (this can be
@@ -300,7 +283,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
         let metadata = self.file.metadata()?;
         let store_size = metadata.len() as usize;
         ensure!(
-            self.len * self.elem_len == store_size,
+            self.len * N::to_usize() == store_size,
             "Inconsistent metadata detected"
         );
 
@@ -316,17 +299,17 @@ impl<E: Element> Store<E> for DiskStore<E> {
         self.len == 0
     }
 
-    fn push(&mut self, el: E) -> Result<()> {
+    fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
         let len = self.len;
         ensure!(
-            (len + 1) * self.elem_len <= self.store_size(),
+            (len + 1) * N::to_usize() <= self.store_size(),
             "not enough space, len: {}, E size {}, store len {}",
             len,
-            self.elem_len,
+            N::to_usize(),
             self.store_size()
         );
 
-        self.write_at(el, len)
+        self.write_at(el.into(), len)
     }
 
     fn sync(&self) -> Result<()> {
@@ -334,7 +317,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     #[allow(unsafe_code)]
-    fn process_layer<A: Algorithm<E>, U: Unsigned>(
+    fn process_layer<A: Algorithm, U: Unsigned>(
         &mut self,
         width: usize,
         level: usize,
@@ -346,15 +329,15 @@ impl<E: Element> Store<E> for DiskStore<E> {
         let mut mmap = unsafe {
             let mut mmap_options = MmapOptions::new();
             mmap_options
-                .offset((write_start * E::byte_len()) as u64)
-                .len(width * E::byte_len())
+                .offset((write_start * N::to_usize()) as u64)
+                .len(width * N::to_usize())
                 .map_mut(&self.file)
         }?;
 
         let data_lock = Arc::new(RwLock::new(self));
         let branches = U::to_usize();
         let shift = log2_pow2(branches);
-        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * E::byte_len();
+        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * N::to_usize();
 
         ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
         Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
@@ -364,18 +347,21 @@ impl<E: Element> Store<E> for DiskStore<E> {
                 let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                 let chunk_nodes = {
+                    let mut chunk_nodes = vec![0u8; chunk_size * N::to_usize()];
                     // Read everything taking the lock once.
-                    data_lock
-                        .read()
-                        .unwrap()
-                        .read_range(chunk_index..chunk_index + chunk_size)?
+                    data_lock.read().unwrap().read_range_into(
+                        chunk_index,
+                        chunk_index + chunk_size,
+                        &mut chunk_nodes,
+                    )?;
+                    chunk_nodes
                 };
 
-                let nodes_size = (chunk_nodes.len() / branches) * E::byte_len();
-                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches).fold(
+                let nodes_size = (chunk_nodes.len() / branches) * N::to_usize();
+                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches * N::to_usize()).fold(
                     Vec::with_capacity(nodes_size),
                     |mut acc, nodes| {
-                        let h = A::default().multi_node(&nodes, level);
+                        let h = A::new().multi_node(nodes.chunks(N::to_usize()), level);
                         acc.extend_from_slice(h.as_ref());
                         acc
                     },
@@ -384,7 +370,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
                 // Check that we correctly pre-allocated the space.
                 let hashed_nodes_as_bytes_len = hashed_nodes_as_bytes.len();
                 ensure!(
-                    hashed_nodes_as_bytes.len() == chunk_size / branches * E::byte_len(),
+                    hashed_nodes_as_bytes.len() == chunk_size / branches * N::to_usize(),
                     "Invalid hashed node length"
                 );
 
@@ -395,12 +381,12 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 
     // DiskStore specific merkle-tree build.
-    fn build<A: Algorithm<E>, U: Unsigned>(
+    fn build<A: Algorithm, U: Unsigned>(
         &mut self,
         leafs: usize,
         row_count: usize,
         _config: Option<StoreConfig>,
-    ) -> Result<E> {
+    ) -> Result<GenericArray<u8, N>> {
         let branches = U::to_usize();
         ensure!(
             next_pow2(branches) == branches,
@@ -458,7 +444,7 @@ impl<E: Element> Store<E> for DiskStore<E> {
     }
 }
 
-impl<E: Element> DiskStore<E> {
+impl<N: ArrayLength> DiskStore<N> {
     fn set_len(&mut self, len: usize) {
         self.len = len;
     }
@@ -478,29 +464,11 @@ impl<E: Element> DiskStore<E> {
         let metadata = file.metadata()?;
         let store_size = metadata.len() as usize;
 
-        Ok(store_size == store_range * E::byte_len())
+        Ok(store_size == store_range * N::to_usize())
     }
 
     pub fn store_size(&self) -> usize {
         self.store_size
-    }
-
-    pub fn store_read_range(&self, start: usize, end: usize) -> Result<Vec<u8>> {
-        let read_len = end - start;
-        let mut read_data = vec![0; read_len];
-
-        self.file
-            .read_exact_at(start as u64, &mut read_data)
-            .with_context(|| {
-                format!(
-                    "failed to read {} bytes from file at offset {}",
-                    read_len, start
-                )
-            })?;
-
-        ensure!(read_data.len() == read_len, "Failed to read the full range");
-
-        Ok(read_data)
     }
 
     pub fn store_read_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
