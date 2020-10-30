@@ -31,7 +31,7 @@ fn test_vec_tree_from_slice<U: Unsigned>(
 ) {
     let mut x = [[0u8; 8]; 16];
     for i in 0..leafs {
-        x[i] = (i * 93).to_le_bytes();
+        x[i] = (i * 93).to_ne_bytes();
     }
     let mt: MerkleTree<XOR128, VecStore<_>, U> =
         MerkleTree::from_data(&x).expect("failed to create tree from slice");
@@ -61,8 +61,8 @@ fn test_vec_tree_from_iter<U: Unsigned>(
 
     let mut a = XOR128::new();
     let mt: MerkleTree<XOR128, VecStore<_>, U> = MerkleTree::try_from_iter((0..leafs).map(|x| {
-        a.update(&(x * 3).to_le_bytes());
-        a.update(&leafs.to_le_bytes());
+        a.update(&(x * 3).to_ne_bytes());
+        a.update(&leafs.to_ne_bytes());
         Ok(a.finalize_reset())
     }))
     .expect("failed to create octree from iter");
@@ -84,7 +84,7 @@ pub fn get_disk_tree_from_slice<U: Unsigned>(
 ) -> MerkleTree<XOR128, DiskStore<typenum::U16>, U> {
     let mut x = Vec::with_capacity(leafs);
     for i in 0..leafs {
-        x.push((i * 93).to_le_bytes());
+        x.push((i * 93).to_ne_bytes());
     }
     MerkleTree::from_data_with_config(&x, config).expect("failed to create tree from slice")
 }
@@ -108,8 +108,8 @@ fn build_disk_tree_from_iter<U: Unsigned>(
     let mt: MerkleTree<XOR128, DiskStore<_>, U> = MerkleTree::try_from_iter_with_config(
         (0..leafs).map(|x| {
             a.reset();
-            a.update(&(x * 3).to_le_bytes());
-            a.update(&leafs.to_le_bytes());
+            a.update(&(x * 3).to_ne_bytes());
+            a.update(&leafs.to_ne_bytes());
             Ok(a.finalize_reset())
         }),
         config.clone(),
@@ -137,7 +137,7 @@ pub fn get_levelcache_tree_from_slice<U: Unsigned>(
 
     let mut x = Vec::with_capacity(leafs);
     for i in 0..leafs {
-        x.push((i * 3).to_le_bytes());
+        x.push((i * 3).to_ne_bytes());
     }
 
     let mut mt = MerkleTree::from_data_with_config(&x, config.clone())
@@ -174,8 +174,8 @@ fn get_levelcache_tree_from_iter<U: Unsigned>(
         MerkleTree::try_from_iter_with_config(
             (0..leafs).map(|x| {
                 a.reset();
-                a.update(&(x * 3).to_le_bytes());
-                a.update(leafs.to_le_bytes());
+                a.update(&(x * 3).to_ne_bytes());
+                a.update(leafs.to_ne_bytes());
                 Ok(a.finalize_reset())
             }),
             config.clone(),
@@ -997,14 +997,14 @@ fn test_simple_tree() {
             [1, 2, 3, 4, 5, 6, 7, 8]
                 .iter()
                 .map(|x: &u8| {
-                    a.update(&x.to_le_bytes());
+                    a.update(&x.to_ne_bytes());
                     Ok(a.finalize_reset())
                 })
                 .take(*items),
         )
         .unwrap();
 
-        assert_eq!(mt_base.leafs(), *items);
+        assert_eq!(mt_base.leafs(), dbg!(*items));
         assert_eq!(
             mt_base.row_count(),
             get_merkle_tree_row_count(mt_base.leafs(), BINARY_ARITY)
@@ -1024,11 +1024,11 @@ fn test_simple_tree() {
         let leafs: Vec<u8> = [1, 2, 3, 4, 5, 6, 7, 8]
             .iter()
             .map(|x: &u8| {
-                a.update(&x.to_be_bytes());
+                a.update(&x.to_ne_bytes());
                 a.finalize_reset()
             })
             .take(*items)
-            .map(|item| a2.leaf(item).to_vec())
+            .map(|item| a2.leaf(item))
             .flatten()
             .collect();
         {
@@ -1091,8 +1091,8 @@ fn test_large_tree_disk() {
     let mt_disk: MerkleTree<XOR128, DiskStore<_>> =
         MerkleTree::from_par_iter((0..count).into_par_iter().map(|x| {
             let mut xor_128 = a.clone();
-            xor_128.update(&x.to_le_bytes());
-            xor_128.update(93u8.to_le_bytes());
+            xor_128.update(&x.to_ne_bytes());
+            xor_128.update(93u8.to_ne_bytes());
             xor_128.finalize_reset()
         }))
         .unwrap();
@@ -1111,8 +1111,8 @@ fn test_mmap_tree() {
 
     let mut mt_map: MerkleTree<XOR128, MmapStore<_>> =
         MerkleTree::try_from_iter((0..count).map(|x| {
-            a.update(&x.to_le_bytes());
-            a.update(93u8.to_le_bytes());
+            a.update(&x.to_ne_bytes());
+            a.update(93u8.to_ne_bytes());
             Ok(a.finalize_reset())
         }))
         .unwrap();
@@ -1182,8 +1182,8 @@ fn test_level_cache_tree_v2() {
     let mut mt_disk: MerkleTree<XOR128, DiskStore<_>> = MerkleTree::from_par_iter_with_config(
         (0..count).into_par_iter().map(|x| {
             let mut xor_128 = a.clone();
-            xor_128.update(x.to_le_bytes());
-            xor_128.update(93u8.to_le_bytes());
+            xor_128.update(x.to_ne_bytes());
+            xor_128.update(93u8.to_ne_bytes());
             xor_128.finalize_reset()
         }),
         config.clone(),
@@ -1292,8 +1292,8 @@ fn test_various_trees_with_partial_cache_v2_only() {
             let mut mt_cache: MerkleTree<XOR128, DiskStore<_>> =
                 MerkleTree::try_from_iter_with_config(
                     (0..count).map(|x| {
-                        a.update(x.to_le_bytes());
-                        a.update(count.to_le_bytes());
+                        a.update(x.to_ne_bytes());
+                        a.update(count.to_ne_bytes());
                         Ok(a.finalize_reset())
                     }),
                     config.clone(),

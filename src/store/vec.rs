@@ -23,11 +23,14 @@ impl<N: ArrayLength> Store<N> for VecStore<N> {
     }
 
     fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
-        if self.data.len() <= index {
-            self.data.resize(index + N::to_usize(), 0);
+        let start = index * N::to_usize();
+        let end = start + N::to_usize();
+
+        if end > self.data.len() {
+            self.data.resize(end, 0);
         }
 
-        self.data[index..index + N::to_usize()].copy_from_slice(&el.as_ref()[..N::to_usize()]);
+        self.data[start..end].copy_from_slice(&el.as_ref()[..N::to_usize()]);
         Ok(())
     }
 
@@ -64,8 +67,10 @@ impl<N: ArrayLength> Store<N> for VecStore<N> {
             N::to_usize()
         );
 
-        let mut v = vec![0u8; size * N::to_usize()];
-        v[..data.len()].copy_from_slice(data);
+        let mut v = data.to_vec();
+        let size = size * N::to_usize();
+        let additional = size - v.len();
+        v.reserve(additional);
 
         Ok(VecStore {
             data: v,

@@ -1431,13 +1431,13 @@ impl<
         start: usize,
         end: usize,
     ) -> Result<Vec<GenericArray<u8, A::OutputSize>>> {
-        ensure!(start < end, "start must be less than end");
+        ensure!(dbg!(start) < dbg!(end), "start must be less than end");
         ensure!(self.data.store().is_some(), "store data required");
 
         let mut out = vec![0u8; (end - start) * A::OutputSize::to_usize()];
         self.read_range_into(start, end, &mut out)?;
 
-        Ok(out
+        Ok(dbg!(out)
             .chunks_exact(A::OutputSize::to_usize())
             .map(Into::into)
             .cloned()
@@ -1520,10 +1520,11 @@ impl<
             "branches MUST be a power of 2"
         );
 
-        let size = get_merkle_tree_len(leafs_count, branches)?;
+        let size = get_merkle_tree_len(dbg!(leafs_count), dbg!(branches))?;
         let row_count = get_merkle_tree_row_count(leafs_count, branches);
 
-        let mut data = S::new_from_slice(size, leafs).context("failed to create data store")?;
+        let mut data =
+            S::new_from_slice(dbg!(size), dbg!(leafs)).context("failed to create data store")?;
 
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, row_count, None)?;
 

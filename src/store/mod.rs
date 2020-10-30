@@ -281,8 +281,8 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
                     (level_node_index, level_node_index + width)
                 };
 
-                self.read_range_into(read_start, read_start + width, &mut parts)?;
-                let layer: Vec<_> = parts
+                self.read_range_into(read_start, read_start + width, &mut parts[..width * N::to_usize()])?;
+                let layer: Vec<_> = parts[..width * N::to_usize()]
                     .par_chunks(branches * N::to_usize())
                     .map(|nodes| A::new().multi_node(nodes.chunks(N::to_usize()), level))
                     .collect();
@@ -379,7 +379,7 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
             next_pow2(branches) == branches,
             "branches MUST be a power of 2"
         );
-        ensure!(Store::len(self) == leafs, "Inconsistent data");
+        ensure!(Store::len(self) == leafs, "Inconsistent data: {} != {}", Store::len(self), leafs);
         ensure!(leafs % 2 == 0, "Leafs must be a power of two");
 
         if leafs <= SMALL_TREE_BUILD {
