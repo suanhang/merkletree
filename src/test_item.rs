@@ -1,7 +1,6 @@
 #![cfg(test)]
 #![allow(unsafe_code)]
 
-use byteorder::{ByteOrder, NativeEndian};
 use std::mem;
 use std::slice;
 
@@ -31,4 +30,3 @@ impl Into<u64> for Item {
         self.0
     }
 }
-

@@ -23,11 +23,13 @@ pro-release-commit-message = "chore(release): starting development cycle for {{n
 
 [dependencies]
 rayon = "1.0.0"
-memmap = "0.7"
+memmap = { version = "0.8", package = "mapr" }
 rand = "0.7.3"
 tempdir = "0.3.7"
 tempfile = "3.0.7"
-positioned-io = "0.2"
+positioned-io = {  path = "../../../opensource/positioned-io", package = "positioned-io-preview" }
+# git = "https://github.com/dignifiedquire/positioned-io",
+# branch = "positioned-io-preview",
 log = "0.4.7"
 serde = { version = "1.0", features = ["derive"]}
 anyhow = "1.0.23"

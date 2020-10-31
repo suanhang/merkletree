@@ -1,10 +1,12 @@
+use std::cell::UnsafeCell;
 use std::fs::{File, OpenOptions};
 use std::ops;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use generic_array::GenericArray;
-use memmap::MmapMut;
+use memmap::{MmapMut, MmapOptions};
 
 use crate::hash::{ArrayLength, ArrayLengthMarker};
 use crate::store::{Store, StoreConfig};
@@ -13,23 +15,51 @@ use crate::store::{Store, StoreConfig};
 #[derive(Debug)]
 pub struct MmapStore<N: ArrayLength> {
     path: PathBuf,
-    map: Option<MmapMut>,
+    map: MmapMut,
+    data: UnsafeCell<&'static mut [u8]>, // not static, bound to the MmapMut
     file: File,
-    len: usize,
+    len: AtomicUsize,
     store_size: usize,
     _n: ArrayLengthMarker<N>,
+}
+
+unsafe impl<N: ArrayLength> Sync for MmapStore<N> {}
+
+impl<N: ArrayLength> MmapStore<N> {
+    fn len_max(&self, other: usize) {
+        let mut current = self.len.load(Ordering::SeqCst);
+        loop {
+            let updated = std::cmp::max(current, other);
+            let inner = self
+                .len
+                .compare_and_swap(current, updated, Ordering::SeqCst);
+            if inner == current {
+                break;
+            }
+            current = inner;
+        }
+    }
+
+    fn get_data_mut(&mut self) -> &mut [u8] {
+        // Safety: self is borrowed mutably
+        unsafe { &mut *self.data.get() }
+    }
+
+    fn get_data(&self) -> &[u8] {
+        // Safety: self is borrowed
+        unsafe { &*self.data.get() }
+    }
 }
 
 impl<N: ArrayLength> ops::Deref for MmapStore<N> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &self.map.as_ref().unwrap()[..]
+        self.get_data()
     }
 }
 
 impl<N: ArrayLength> Store<N> for MmapStore<N> {
-    #[allow(unsafe_code)]
     fn new_with_config(size: usize, branches: usize, config: StoreConfig) -> Result<Self> {
         let data_path = StoreConfig::data_path(&config.path, &config.id);
 
@@ -48,38 +78,40 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         let store_size = N::to_usize() * size;
         file.set_len(store_size as u64)?;
 
-        let map = unsafe { MmapMut::map_mut(&file)? };
+        let mut map = unsafe { MmapOptions::new().private().map_mut(&file)? };
+        let data = UnsafeCell::new(unsafe { std::mem::transmute(&mut map[..]) });
 
         Ok(MmapStore {
             path: data_path,
-            map: Some(map),
+            map,
+            data,
             file,
-            len: 0,
+            len: AtomicUsize::new(0),
             store_size,
             _n: Default::default(),
         })
     }
 
-    #[allow(unsafe_code)]
     fn new(size: usize) -> Result<Self> {
         let store_size = N::to_usize() * size;
 
         let file = tempfile::NamedTempFile::new()?;
         file.as_file().set_len(store_size as u64)?;
         let (file, path) = file.into_parts();
-        let map = unsafe { MmapMut::map_mut(&file)? };
+        let mut map = unsafe { MmapOptions::new().private().map_mut(&file)? };
+        let data = UnsafeCell::new(unsafe { std::mem::transmute(&mut map[..]) });
 
         Ok(MmapStore {
             path: path.keep()?,
-            map: Some(map),
+            map,
+            data,
             file,
-            len: 0,
+            len: AtomicUsize::new(0),
             store_size,
             _n: Default::default(),
         })
     }
 
-    #[allow(unsafe_code)]
     fn new_from_disk(size: usize, _branches: usize, config: &StoreConfig) -> Result<Self> {
         let data_path = StoreConfig::data_path(&config.path, &config.id);
 
@@ -95,13 +127,15 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
             store_size
         );
 
-        let map = unsafe { MmapMut::map_mut(&file)? };
+        let mut map = unsafe { MmapOptions::new().private().map_mut(&file)? };
+        let data = UnsafeCell::new(unsafe { std::mem::transmute(&mut map[..]) });
 
         Ok(MmapStore {
             path: data_path,
-            map: Some(map),
+            map,
+            data,
             file,
-            len: size,
+            len: AtomicUsize::new(size),
             store_size,
             _n: Default::default(),
         })
@@ -111,12 +145,8 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         let start = index * N::to_usize();
         let end = start + N::to_usize();
 
-        if self.map.is_none() {
-            self.reinit()?;
-        }
-
-        self.map.as_mut().unwrap()[start..end].copy_from_slice(&el.as_ref()[..N::to_usize()]);
-        self.len = std::cmp::max(self.len, index + 1);
+        self.get_data_mut()[start..end].copy_from_slice(&el.as_ref()[..N::to_usize()]);
+        self.len_max(index + 1);
 
         Ok(())
     }
@@ -131,12 +161,18 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         let map_start = start * N::to_usize();
         let map_end = map_start + buf.len();
 
-        if self.map.is_none() {
-            self.reinit()?;
-        }
+        self.get_data_mut()[map_start..map_end].copy_from_slice(buf);
+        self.len_max(start + (buf.len() / N::to_usize()));
 
-        self.map.as_mut().unwrap()[map_start..map_end].copy_from_slice(buf);
-        self.len = std::cmp::max(self.len, start + (buf.len() / N::to_usize()));
+        Ok(())
+    }
+
+    unsafe fn copy_from_slice_unchecked(&self, buf: &[u8], start: usize) -> Result<()> {
+        let map_start = start * N::to_usize();
+        let map_end = map_start + buf.len();
+
+        (&mut *self.data.get())[map_start..map_end].copy_from_slice(buf);
+        self.len_max(start + (buf.len() / N::to_usize()));
 
         Ok(())
     }
@@ -160,14 +196,10 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         // since it can be assumed by the config that the data is
         // already correct).
         if !store.loaded_from_disk() {
-            if store.map.is_none() {
-                store.reinit()?;
-            }
-
             let len = data.len();
 
-            store.map.as_mut().unwrap()[0..len].copy_from_slice(data);
-            store.len = len / N::to_usize();
+            store.map.as_mut()[0..len].copy_from_slice(data);
+            store.len.store(len / N::to_usize(), Ordering::SeqCst);
         }
 
         Ok(store)
@@ -181,61 +213,54 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         );
 
         let mut store = Self::new(size)?;
-        ensure!(store.map.is_some(), "Internal map needs to be initialized");
 
         let len = data.len();
-        store.map.as_mut().unwrap()[0..len].copy_from_slice(data);
-        store.len = len / N::to_usize();
+        store.map.as_mut()[0..len].copy_from_slice(data);
+        store.len.store(len / N::to_usize(), Ordering::SeqCst);
 
         Ok(store)
     }
 
     fn read_at(&self, index: usize) -> Result<GenericArray<u8, N>> {
-        ensure!(self.map.is_some(), "Internal map needs to be initialized");
-
         let start = index * N::to_usize();
         let end = start + N::to_usize();
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
 
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        let res: &GenericArray<u8, N> = self.map.as_ref().unwrap()[start..end].into();
+        let res: &GenericArray<u8, N> = self.get_data()[start..end].into();
         Ok(res.clone())
     }
 
     fn read_into(&self, index: usize, buf: &mut [u8]) -> Result<()> {
-        ensure!(self.map.is_some(), "Internal map needs to be initialized");
-
         let start = index * N::to_usize();
         let end = start + N::to_usize();
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
 
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        buf.copy_from_slice(&self.map.as_ref().unwrap()[start..end]);
+        buf.copy_from_slice(&self.get_data()[start..end]);
 
         Ok(())
     }
 
     fn read_range_into(&self, start: usize, end: usize, buf: &mut [u8]) -> Result<()> {
-        ensure!(self.map.is_some(), "Internal map needs to be initialized");
-
         let start = start * N::to_usize();
         let end = end * N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
-        buf.copy_from_slice(&self.map.as_ref().unwrap()[start..end]);
+        buf.copy_from_slice(&self.get_data()[start..end]);
 
         Ok(())
     }
 
     fn len(&self) -> usize {
-        self.len
+        self.len.load(Ordering::SeqCst)
     }
 
     fn loaded_from_disk(&self) -> bool {
@@ -248,15 +273,15 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
         _config: StoreConfig,
         _store_version: u32,
     ) -> Result<bool> {
-        let map = self.map.take();
+        Ok(true)
+        // let map = self.map.take();
 
-        Ok(map.is_some())
+        // Ok(map.is_some())
     }
 
-    #[allow(unsafe_code)]
     fn reinit(&mut self) -> Result<()> {
-        self.map = unsafe { Some(MmapMut::map_mut(&self.file)?) };
-        ensure!(self.map.is_some(), "Re-init mapping failed");
+        // self.map = unsafe { Some(MmapMut::map_mut(&self.file)?) };
+        // ensure!(self.map.is_some(), "Re-init mapping failed");
 
         Ok(())
     }
@@ -266,18 +291,14 @@ impl<N: ArrayLength> Store<N> for MmapStore<N> {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
-        let l = self.len;
-
-        if self.map.is_none() {
-            self.reinit()?;
-        }
+        let l = self.len();
 
         ensure!(
-            (l + 1) * N::to_usize() <= self.map.as_ref().unwrap().len(),
+            (l + 1) * N::to_usize() <= self.get_data().len(),
             "not enough space"
         );
 

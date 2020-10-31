@@ -3,7 +3,6 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use generic_array::GenericArray;
@@ -222,6 +221,10 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
     // position in `E` sizes (*not* in `u8`).
     fn copy_from_slice(&mut self, buf: &[u8], start: usize) -> Result<()>;
 
+    /// Unsafe version of writing, used in building where it is guranteed that there are no
+    /// overlaps in writing.
+    unsafe fn copy_from_slice_unchecked(&self, buf: &[u8], start: usize) -> Result<()>;
+
     // compact/shrink resources used where possible.
     fn compact(&mut self, branches: usize, config: StoreConfig, store_version: u32)
         -> Result<bool>;
@@ -273,26 +276,26 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
         
         while width > 1 {
             // Same indexing logic as `build`.
-            let (layer, write_start) = {
-                let (read_start, write_start) = if level == 0 {
-                    // Note that we previously asserted that data.len() == leafs.
-                    (0, Store::len(self))
-                } else {
-                    (level_node_index, level_node_index + width)
-                };
 
-                self.read_range_into(read_start, read_start + width, &mut parts[..width * N::to_usize()])?;
-                let layer: Vec<_> = parts[..width * N::to_usize()]
-                    .par_chunks(branches * N::to_usize())
-                    .map(|nodes| A::new().multi_node(nodes.chunks(N::to_usize()), level))
-                    .collect();
-
-                (layer, write_start)
+            let (read_start, write_start) = if level == 0 {
+                // Note that we previously asserted that data.len() == leafs.
+                (0, Store::len(self))
+            } else {
+                (level_node_index, level_node_index + width)
             };
 
-            for (i, node) in layer.into_iter().enumerate() {
-                self.write_at(node, write_start + i)?;
-            }
+            self.read_range_into(read_start, read_start + width, &mut parts[..width * N::to_usize()])?;
+            parts[..width * N::to_usize()]
+                .par_chunks(branches * N::to_usize()) 
+                .enumerate()
+                .try_for_each(|(i, nodes)| -> Result<()> {
+                    let value = A::new().multi_node(nodes.chunks(N::to_usize()), level);
+                    // Safety: no overlapping writes to the store based on construction.
+                    unsafe {
+                        self.copy_from_slice_unchecked(&value, write_start + i)?;
+                    }
+                    Ok(())
+                })?;
 
             level_node_index += width;
             level += 1;
@@ -314,7 +317,6 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
         write_start: usize,
     ) -> Result<()> {
         let branches = U::to_usize();
-        let data_lock = Arc::new(RwLock::new(self));
 
         // Allocate `width` indexes during operation (which is a negligible memory bloat
         // compared to the 32-bytes size of the nodes stored in the `Store`s) and hash each
@@ -324,17 +326,14 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
         // the work).
         ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
         Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
-            .par_iter()
+            .par_iter() 
             .try_for_each(|&chunk_index| -> Result<()> {
                 let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
 
                 let chunk_nodes = {
                     let mut chunked_nodes = vec![0u8; chunk_size * N::to_usize()];
                     // Read everything taking the lock once.
-                    data_lock
-                        .read()
-                        .unwrap()
-                        .read_range_into(chunk_index, chunk_index + chunk_size, &mut chunked_nodes)?;
+                    self.read_range_into(chunk_index, chunk_index + chunk_size, &mut chunked_nodes)?;
                     chunked_nodes
                 };
 
@@ -360,10 +359,10 @@ pub trait Store<N: ArrayLength>: /*std::fmt::Debug +*/ Send + Sync + Sized {
                 );
 
                 // Write the data into the store.
-                data_lock
-                    .write()
-                    .unwrap()
-                    .copy_from_slice(&hashed_nodes_as_bytes, write_start + write_delta)
+                // Safety: no overlapping writes because of construction.
+                unsafe {
+                    self.copy_from_slice_unchecked(&hashed_nodes_as_bytes, write_start + write_delta)
+                }
             })
     }
 

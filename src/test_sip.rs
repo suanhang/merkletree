@@ -1,11 +1,11 @@
 #![cfg(test)]
 
-use crate::merkle::log2_pow2;
-use crate::merkle::next_pow2;
-use crate::merkle::MerkleTree;
-use crate::store::VecStore;
-use crate::test_item::Item;
-use std::collections::hash_map::DefaultHasher;
+// use crate::merkle::log2_pow2;
+// use crate::merkle::next_pow2;
+// use crate::merkle::MerkleTree;
+// use crate::store::VecStore;
+// use crate::test_item::Item;
+// use std::collections::hash_map::DefaultHasher;
 
 // #[test]
 // fn test_simple_tree() {

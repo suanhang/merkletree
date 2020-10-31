@@ -1,16 +1,12 @@
 use std::fmt;
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{copy, Read, Seek, SeekFrom};
-use std::iter::FromIterator;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use generic_array::GenericArray;
-use memmap::MmapOptions;
-use positioned_io::{ReadAt, WriteAt};
-use rayon::iter::*;
-use rayon::prelude::*;
+use positioned_io::{RandomAccessFile, ReadAt, WriteAt};
 use tempfile::tempfile;
 use typenum::marker_traits::Unsigned;
 
@@ -18,7 +14,7 @@ use crate::hash::{Algorithm, ArrayLength, ArrayLengthMarker};
 use crate::merkle::{
     get_merkle_tree_cache_size, get_merkle_tree_leafs, get_merkle_tree_len, log2_pow2, next_pow2,
 };
-use crate::store::{ExternalReader, Store, StoreConfig, BUILD_CHUNK_NODES};
+use crate::store::{ExternalReader, Store, StoreConfig};
 
 /// The LevelCacheStore is used to reduce the on-disk footprint even
 /// further to the minimum at the cost of build time performance.
@@ -29,8 +25,8 @@ use crate::store::{ExternalReader, Store, StoreConfig, BUILD_CHUNK_NODES};
 /// are tied, structurally to the configuration they were built with
 /// and can only be accessed with the same number of levels.
 pub struct LevelCacheStore<N: ArrayLength, R: Read + Send + Sync> {
-    len: usize,
-    file: File,
+    len: AtomicUsize,
+    file: RandomAccessFile,
 
     // The number of base layer data items.
     data_width: usize,
@@ -54,10 +50,26 @@ pub struct LevelCacheStore<N: ArrayLength, R: Read + Send + Sync> {
     _n: ArrayLengthMarker<N>,
 }
 
+impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
+    fn len_max(&self, other: usize) {
+        let mut current = self.len.load(Ordering::SeqCst);
+        loop {
+            let updated = std::cmp::max(current, other);
+            let inner = self
+                .len
+                .compare_and_swap(current, updated, Ordering::SeqCst);
+            if inner == current {
+                break;
+            }
+            current = inner;
+        }
+    }
+}
+
 impl<N: ArrayLength, R: Read + Send + Sync> fmt::Debug for LevelCacheStore<N, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LevelCacheStore")
-            .field("len", &self.len)
+            .field("len", &self.len.load(Ordering::SeqCst))
             .field("data_width", &self.data_width)
             .field("loaded_from_disk", &self.loaded_from_disk)
             .field("cache_index_start", &self.cache_index_start)
@@ -113,8 +125,8 @@ impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
         );
 
         Ok(LevelCacheStore {
-            len: store_range / N::to_usize(),
-            file,
+            len: AtomicUsize::new(store_range / N::to_usize()),
+            file: RandomAccessFile::try_new(file)?,
             data_width: size,
             cache_index_start,
             store_size,
@@ -166,8 +178,8 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         file.set_len(store_size as u64)?;
 
         Ok(LevelCacheStore {
-            len: 0,
-            file,
+            len: AtomicUsize::new(0),
+            file: RandomAccessFile::try_new(file)?,
             data_width: leafs,
             cache_index_start,
             store_size,
@@ -183,8 +195,8 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         file.set_len(store_size as u64)?;
 
         Ok(LevelCacheStore {
-            len: 0,
-            file,
+            len: AtomicUsize::new(0),
+            file: RandomAccessFile::try_new(file)?,
             data_width: size,
             cache_index_start: 0,
             store_size,
@@ -206,7 +218,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
             N::to_usize()
         );
 
-        let mut store = Self::new_with_config(size, branches, config)?;
+        let store = Self::new_with_config(size, branches, config)?;
 
         // If the store was loaded from disk (based on the config
         // information, avoid re-populating the store at this point
@@ -214,7 +226,9 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         // already correct).
         if !store.loaded_from_disk {
             store.store_copy_from_slice(0, data)?;
-            store.len = data.len() / N::to_usize();
+            store
+                .len
+                .store(data.len() / N::to_usize(), Ordering::SeqCst);
         }
 
         Ok(store)
@@ -227,9 +241,11 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
             N::to_usize()
         );
 
-        let mut store = Self::new(size)?;
+        let store = Self::new(size)?;
         store.store_copy_from_slice(0, data)?;
-        store.len = data.len() / N::to_usize();
+        store
+            .len
+            .store(data.len() / N::to_usize(), Ordering::SeqCst);
 
         Ok(store)
     }
@@ -277,8 +293,8 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
          */
 
         Ok(LevelCacheStore {
-            len: store_range / N::to_usize(),
-            file,
+            len: AtomicUsize::new(store_range / N::to_usize()),
+            file: RandomAccessFile::try_new(file)?,
             data_width: size,
             cache_index_start,
             loaded_from_disk: true,
@@ -290,7 +306,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
 
     fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
         self.store_copy_from_slice(index * N::to_usize(), el.as_ref())?;
-        self.len = std::cmp::max(self.len, index + 1);
+        self.len_max(index + 1);
 
         Ok(())
     }
@@ -302,7 +318,14 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
             N::to_usize()
         );
         self.store_copy_from_slice(start * N::to_usize(), buf)?;
-        self.len = std::cmp::max(self.len, start + buf.len() / N::to_usize());
+        self.len_max(start + buf.len() / N::to_usize());
+
+        Ok(())
+    }
+
+    unsafe fn copy_from_slice_unchecked(&self, buf: &[u8], start: usize) -> Result<()> {
+        self.store_copy_from_slice(start * N::to_usize(), buf)?;
+        self.len_max(start + buf.len() / N::to_usize());
 
         Ok(())
     }
@@ -311,7 +334,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         let start = index * N::to_usize();
         let end = start + N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
@@ -328,7 +351,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         let start = index * N::to_usize();
         let end = start + N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
@@ -343,7 +366,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
         let start = start * N::to_usize();
         let end = end * N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = self.len() * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
         ensure!(
@@ -355,7 +378,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
     }
 
     fn len(&self) -> usize {
-        self.len
+        self.len.load(Ordering::SeqCst)
     }
 
     fn loaded_from_disk(&self) -> bool {
@@ -377,11 +400,11 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
-        let len = self.len;
+        let len = self.len();
         ensure!(
             (len + 1) * N::to_usize() <= self.store_size(),
             "not enough space, len: {}, E size {}, store len {}",
@@ -395,70 +418,6 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
 
     fn sync(&self) -> Result<()> {
         self.file.sync_all().context("failed to sync file")
-    }
-
-    #[allow(unsafe_code)]
-    fn process_layer<A: Algorithm, U: Unsigned>(
-        &mut self,
-        width: usize,
-        level: usize,
-        read_start: usize,
-        write_start: usize,
-    ) -> Result<()> {
-        // Safety: this operation is safe becase it's a limited
-        // writable region on the backing store managed by this type.
-        let mut mmap = unsafe {
-            let mut mmap_options = MmapOptions::new();
-            mmap_options
-                .offset((write_start * N::to_usize()) as u64)
-                .len(width * N::to_usize())
-                .map_mut(&self.file)
-        }?;
-
-        let data_lock = Arc::new(RwLock::new(self));
-        let branches = U::to_usize();
-        let shift = log2_pow2(branches);
-        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * N::to_usize();
-
-        ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
-        Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
-            .into_par_iter()
-            .zip(mmap.par_chunks_mut(write_chunk_width))
-            .try_for_each(|(chunk_index, write_mmap)| -> Result<()> {
-                let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
-
-                let chunk_nodes = {
-                    let mut chunk_nodes = vec![0u8; chunk_size * N::to_usize()];
-                    // Read everything taking the lock once.
-                    data_lock.read().unwrap().read_range_into(
-                        chunk_index,
-                        chunk_index + chunk_size,
-                        &mut chunk_nodes,
-                    )?;
-                    chunk_nodes
-                };
-
-                let nodes_size = (chunk_nodes.len() / branches) * N::to_usize();
-                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches * N::to_usize()).fold(
-                    Vec::with_capacity(nodes_size),
-                    |mut acc, nodes| {
-                        let h = A::new().multi_node(nodes.chunks(N::to_usize()), level);
-                        acc.extend_from_slice(h.as_ref());
-                        acc
-                    },
-                );
-
-                // Check that we correctly pre-allocated the space.
-                let hashed_nodes_as_bytes_len = hashed_nodes_as_bytes.len();
-                ensure!(
-                    hashed_nodes_as_bytes.len() == chunk_size / branches * N::to_usize(),
-                    "Invalid hashed node length"
-                );
-
-                write_mmap[0..hashed_nodes_as_bytes_len].copy_from_slice(&hashed_nodes_as_bytes);
-
-                Ok(())
-            })
     }
 
     // LevelCacheStore specific merkle-tree build.
@@ -550,7 +509,7 @@ impl<N: ArrayLength, R: Read + Send + Sync> Store<N> for LevelCacheStore<N, R> {
 
 impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
     pub fn set_len(&mut self, len: usize) {
-        self.len = len;
+        self.len.store(len, Ordering::SeqCst)
     }
 
     // Remove 'len' elements from the front of the file.
@@ -568,18 +527,17 @@ impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
         reader.seek(SeekFrom::Start(len))?;
 
         // Make sure the store file is opened for read/write.
-        self.file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(StoreConfig::data_path(&config.path, &config.id))?;
-
         // Seek the writer.
-        self.file.seek(SeekFrom::Start(0))?;
-
-        let written = copy(&mut reader, &mut self.file)?;
+        file.seek(SeekFrom::Start(0))?;
+        let written = copy(&mut reader, &mut file)?;
         ensure!(written == store_size - len, "Failed to copy all data");
 
-        self.file.set_len(written)?;
+        file.set_len(written)?;
+        self.file = RandomAccessFile::try_new(file)?;
 
         Ok(())
     }
@@ -703,13 +661,14 @@ impl<N: ArrayLength, R: Read + Send + Sync> LevelCacheStore<N, R> {
         Ok(())
     }
 
-    pub fn store_copy_from_slice(&mut self, start: usize, slice: &[u8]) -> Result<()> {
+    pub fn store_copy_from_slice(&self, start: usize, slice: &[u8]) -> Result<()> {
         ensure!(
             start + slice.len() <= self.store_size,
             "Requested slice too large (max: {})",
             self.store_size
         );
-        self.file.write_all_at(start as u64, slice)?;
+        let file: &mut &RandomAccessFile = &mut &self.file;
+        file.write_all_at(start as u64, slice)?;
 
         Ok(())
     }

@@ -256,10 +256,10 @@ fn test_levelcache_v1_tree_from_iter<U: Unsigned>(
     assert_eq!(mt_cache.leafs(), leafs);
     assert_eq!(mt_cache.row_count(), row_count);
 
-    match mt_cache.compact(config.clone(), StoreConfigDataVersion::One as u32) {
-        Ok(x) => assert_eq!(x, true),
-        Err(_) => panic!("Compaction failed"),
-    }
+    let x = mt_cache
+        .compact(config.clone(), StoreConfigDataVersion::One as u32)
+        .expect("compactation failed");
+    assert!(x);
 
     // Then re-create an MT using LevelCacheStore and generate all proofs.
     assert!(
@@ -1004,7 +1004,7 @@ fn test_simple_tree() {
         )
         .unwrap();
 
-        assert_eq!(mt_base.leafs(), dbg!(*items));
+        assert_eq!(mt_base.leafs(), *items);
         assert_eq!(
             mt_base.row_count(),
             get_merkle_tree_row_count(mt_base.leafs(), BINARY_ARITY)

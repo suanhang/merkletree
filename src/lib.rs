@@ -153,7 +153,6 @@
     missing_copy_implementations,
     trivial_casts,
     trivial_numeric_casts,
-    unsafe_code,
     unstable_features,
     unused_import_braces
 )]
@@ -188,5 +187,3 @@ mod test_item;
 /// Tests SIP.
 #[cfg(test)]
 mod test_sip;
-
-

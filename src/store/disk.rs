@@ -1,31 +1,24 @@
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{copy, Seek, SeekFrom};
-use std::iter::FromIterator;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use generic_array::GenericArray;
-use memmap::MmapOptions;
-use positioned_io::{ReadAt, WriteAt};
-use rayon::iter::*;
-use rayon::prelude::*;
+use positioned_io::{RandomAccessFile, ReadAt, WriteAt};
 use tempfile::tempfile;
-use typenum::marker_traits::Unsigned;
 
-use crate::hash::{Algorithm, ArrayLength, ArrayLengthMarker};
-use crate::merkle::{
-    get_merkle_tree_cache_size, get_merkle_tree_leafs, get_merkle_tree_len, log2_pow2, next_pow2,
-};
-use crate::store::{Store, StoreConfig, StoreConfigDataVersion, BUILD_CHUNK_NODES};
+use crate::hash::{ArrayLength, ArrayLengthMarker};
+use crate::merkle::{get_merkle_tree_cache_size, get_merkle_tree_leafs};
+use crate::store::{Store, StoreConfig, StoreConfigDataVersion};
 
 /// The Disk-only store is used to reduce memory to the minimum at the
 /// cost of build time performance. Most of its I/O logic is in the
 /// `store_copy_from_slice` and `store_read_range` functions.
 #[derive(Debug)]
 pub struct DiskStore<N: ArrayLength> {
-    len: usize,
-    file: File,
+    len: AtomicUsize,
+    file: RandomAccessFile,
 
     // This flag is useful only immediate after instantiation, which
     // is false if the store was newly initialized and true if the
@@ -38,6 +31,22 @@ pub struct DiskStore<N: ArrayLength> {
     store_size: usize,
 
     _n: ArrayLengthMarker<N>,
+}
+
+impl<N: ArrayLength> DiskStore<N> {
+    fn len_max(&self, other: usize) {
+        let mut current = self.len.load(Ordering::SeqCst);
+        loop {
+            let updated = std::cmp::max(current, other);
+            let inner = self
+                .len
+                .compare_and_swap(current, updated, Ordering::SeqCst);
+            if inner == current {
+                break;
+            }
+            current = inner;
+        }
+    }
 }
 
 impl<N: ArrayLength> Store<N> for DiskStore<N> {
@@ -60,8 +69,8 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         file.set_len(store_size as u64)?;
 
         Ok(DiskStore {
-            len: 0,
-            file,
+            len: AtomicUsize::new(0),
+            file: RandomAccessFile::try_new(file)?,
             loaded_from_disk: false,
             store_size,
             _n: Default::default(),
@@ -74,8 +83,8 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         file.set_len(store_size as u64)?;
 
         Ok(DiskStore {
-            len: 0,
-            file,
+            len: AtomicUsize::new(0),
+            file: RandomAccessFile::try_new(file)?,
             loaded_from_disk: false,
             store_size,
             _n: Default::default(),
@@ -94,7 +103,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
             N::to_usize()
         );
 
-        let mut store = Self::new_with_config(size, branches, config)?;
+        let store = Self::new_with_config(size, branches, config)?;
 
         // If the store was loaded from disk (based on the config
         // information, avoid re-populating the store at this point
@@ -102,7 +111,9 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         // already correct).
         if !store.loaded_from_disk {
             store.store_copy_from_slice(0, data)?;
-            store.len = data.len() / N::to_usize();
+            store
+                .len
+                .store(data.len() / N::to_usize(), Ordering::SeqCst);
         }
 
         Ok(store)
@@ -115,9 +126,11 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
             N::to_usize()
         );
 
-        let mut store = Self::new(size)?;
+        let store = Self::new(size)?;
         store.store_copy_from_slice(0, data)?;
-        store.len = data.len() / N::to_usize();
+        store
+            .len
+            .store(data.len() / N::to_usize(), Ordering::SeqCst);
 
         Ok(store)
     }
@@ -138,8 +151,8 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         );
 
         Ok(DiskStore {
-            len: size,
-            file,
+            len: AtomicUsize::new(size),
+            file: RandomAccessFile::try_new(file)?,
             loaded_from_disk: true,
             store_size,
             _n: Default::default(),
@@ -148,7 +161,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
 
     fn write_at(&mut self, el: impl AsRef<[u8]>, index: usize) -> Result<()> {
         self.store_copy_from_slice(index * N::to_usize(), el.as_ref())?;
-        self.len = std::cmp::max(self.len, index + 1);
+        self.len_max(index + 1);
         Ok(())
     }
 
@@ -158,8 +171,16 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
             "buf size must be a multiple of {}",
             N::to_usize()
         );
+        unsafe {
+            self.copy_from_slice_unchecked(buf, start)?;
+        }
+
+        Ok(())
+    }
+
+    unsafe fn copy_from_slice_unchecked(&self, buf: &[u8], start: usize) -> Result<()> {
         self.store_copy_from_slice(start * N::to_usize(), buf)?;
-        self.len = std::cmp::max(self.len, start + buf.len() / N::to_usize());
+        self.len_max(start + buf.len() / N::to_usize());
 
         Ok(())
     }
@@ -168,7 +189,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         let start = index * N::to_usize();
         let end = start + N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = Store::len(self) * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
@@ -182,7 +203,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         let start = index * N::to_usize();
         let end = start + N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = Store::len(self) * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
@@ -193,7 +214,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         let start = start * N::to_usize();
         let end = end * N::to_usize();
 
-        let len = self.len * N::to_usize();
+        let len = Store::len(self) * N::to_usize();
         ensure!(start < len, "start out of range {} >= {}", start, len);
         ensure!(end <= len, "end out of range {} > {}", end, len);
 
@@ -201,7 +222,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
     }
 
     fn len(&self) -> usize {
-        self.len
+        self.len.load(Ordering::SeqCst)
     }
 
     fn loaded_from_disk(&self) -> bool {
@@ -218,7 +239,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         store_version: u32,
     ) -> Result<bool> {
         // Determine how many base layer leafs there are (and in bytes).
-        let leafs = get_merkle_tree_leafs(self.len, branches)?;
+        let leafs = get_merkle_tree_leafs(Store::len(self), branches)?;
         let data_width = leafs * N::to_usize();
 
         // Calculate how large the cache should be (based on the
@@ -233,7 +254,7 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         // calling this method.  To resolve, provide a sane
         // configuration.
         ensure!(
-            cache_size < self.len * N::to_usize() && cache_size != 0,
+            cache_size < Store::len(self) * N::to_usize() && cache_size != 0,
             "Cannot compact with this configuration"
         );
 
@@ -251,41 +272,44 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
         reader.seek(SeekFrom::Start(cache_start as u64))?;
 
         // Make sure the store file is opened for read/write.
-        self.file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(StoreConfig::data_path(&config.path, &config.id))?;
 
         // Seek the writer.
-        self.file.seek(SeekFrom::Start(start))?;
+        file.seek(SeekFrom::Start(start))?;
 
         // Copy the data from the cached region to the writer.
-        let written = copy(&mut reader, &mut self.file)?;
+        let written = copy(&mut reader, &mut file)?;
         ensure!(written == cache_size as u64, "Failed to copy all data");
         if v1 {
             // Truncate the data on-disk to be the base layer data
             // followed by the cached data.
-            self.file.set_len((data_width + cache_size) as u64)?;
+            file.set_len((data_width + cache_size) as u64)?;
             // Adjust our length for internal consistency.
-            self.len = (data_width + cache_size) / N::to_usize();
+            self.len
+                .store((data_width + cache_size) / N::to_usize(), Ordering::SeqCst);
         } else {
             // Truncate the data on-disk to be only the cached data.
-            self.file.set_len(cache_size as u64)?;
+            file.set_len(cache_size as u64)?;
 
             // Adjust our length to be the cached elements only for
             // internal consistency.
-            self.len = cache_size / N::to_usize();
+            self.len.store(cache_size / N::to_usize(), Ordering::SeqCst);
         }
 
         // Sync and sanity check that we match on disk (this can be
         // removed if needed).
         self.sync()?;
-        let metadata = self.file.metadata()?;
+        let metadata = file.metadata()?;
         let store_size = metadata.len() as usize;
         ensure!(
-            self.len * N::to_usize() == store_size,
+            Store::len(self) * N::to_usize() == store_size,
             "Inconsistent metadata detected"
         );
+
+        self.file = RandomAccessFile::try_new(file)?;
 
         Ok(true)
     }
@@ -296,11 +320,11 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
     }
 
     fn is_empty(&self) -> bool {
-        self.len == 0
+        Store::len(self) == 0
     }
 
     fn push(&mut self, el: impl Into<GenericArray<u8, N>>) -> Result<()> {
-        let len = self.len;
+        let len = Store::len(self);
         ensure!(
             (len + 1) * N::to_usize() <= self.store_size(),
             "not enough space, len: {}, E size {}, store len {}",
@@ -315,140 +339,9 @@ impl<N: ArrayLength> Store<N> for DiskStore<N> {
     fn sync(&self) -> Result<()> {
         self.file.sync_all().context("failed to sync file")
     }
-
-    #[allow(unsafe_code)]
-    fn process_layer<A: Algorithm, U: Unsigned>(
-        &mut self,
-        width: usize,
-        level: usize,
-        read_start: usize,
-        write_start: usize,
-    ) -> Result<()> {
-        // Safety: this operation is safe becase it's a limited
-        // writable region on the backing store managed by this type.
-        let mut mmap = unsafe {
-            let mut mmap_options = MmapOptions::new();
-            mmap_options
-                .offset((write_start * N::to_usize()) as u64)
-                .len(width * N::to_usize())
-                .map_mut(&self.file)
-        }?;
-
-        let data_lock = Arc::new(RwLock::new(self));
-        let branches = U::to_usize();
-        let shift = log2_pow2(branches);
-        let write_chunk_width = (BUILD_CHUNK_NODES >> shift) * N::to_usize();
-
-        ensure!(BUILD_CHUNK_NODES % branches == 0, "Invalid chunk size");
-        Vec::from_iter((read_start..read_start + width).step_by(BUILD_CHUNK_NODES))
-            .into_par_iter()
-            .zip(mmap.par_chunks_mut(write_chunk_width))
-            .try_for_each(|(chunk_index, write_mmap)| -> Result<()> {
-                let chunk_size = std::cmp::min(BUILD_CHUNK_NODES, read_start + width - chunk_index);
-
-                let chunk_nodes = {
-                    let mut chunk_nodes = vec![0u8; chunk_size * N::to_usize()];
-                    // Read everything taking the lock once.
-                    data_lock.read().unwrap().read_range_into(
-                        chunk_index,
-                        chunk_index + chunk_size,
-                        &mut chunk_nodes,
-                    )?;
-                    chunk_nodes
-                };
-
-                let nodes_size = (chunk_nodes.len() / branches) * N::to_usize();
-                let hashed_nodes_as_bytes = chunk_nodes.chunks(branches * N::to_usize()).fold(
-                    Vec::with_capacity(nodes_size),
-                    |mut acc, nodes| {
-                        let h = A::new().multi_node(nodes.chunks(N::to_usize()), level);
-                        acc.extend_from_slice(h.as_ref());
-                        acc
-                    },
-                );
-
-                // Check that we correctly pre-allocated the space.
-                let hashed_nodes_as_bytes_len = hashed_nodes_as_bytes.len();
-                ensure!(
-                    hashed_nodes_as_bytes.len() == chunk_size / branches * N::to_usize(),
-                    "Invalid hashed node length"
-                );
-
-                write_mmap[0..hashed_nodes_as_bytes_len].copy_from_slice(&hashed_nodes_as_bytes);
-
-                Ok(())
-            })
-    }
-
-    // DiskStore specific merkle-tree build.
-    fn build<A: Algorithm, U: Unsigned>(
-        &mut self,
-        leafs: usize,
-        row_count: usize,
-        _config: Option<StoreConfig>,
-    ) -> Result<GenericArray<u8, N>> {
-        let branches = U::to_usize();
-        ensure!(
-            next_pow2(branches) == branches,
-            "branches MUST be a power of 2"
-        );
-        ensure!(Store::len(self) == leafs, "Inconsistent data");
-        ensure!(leafs % 2 == 0, "Leafs must be a power of two");
-
-        // Process one `level` at a time of `width` nodes. Each level has half the nodes
-        // as the previous one; the first level, completely stored in `data`, has `leafs`
-        // nodes. We guarantee an even number of nodes per `level`, duplicating the last
-        // node if necessary.
-        let mut level: usize = 0;
-        let mut width = leafs;
-        let mut level_node_index = 0;
-
-        let shift = log2_pow2(branches);
-
-        while width > 1 {
-            // Start reading at the beginning of the current level, and writing the next
-            // level immediate after.  `level_node_index` keeps track of the current read
-            // starts, and width is updated accordingly at each level so that we know where
-            // to start writing.
-            let (read_start, write_start) = if level == 0 {
-                // Note that we previously asserted that data.len() == leafs.
-                (0, Store::len(self))
-            } else {
-                (level_node_index, level_node_index + width)
-            };
-
-            self.process_layer::<A, U>(width, level, read_start, write_start)?;
-
-            level_node_index += width;
-            level += 1;
-            width >>= shift; // width /= branches;
-
-            // When the layer is complete, update the store length
-            // since we know the backing file was updated outside of
-            // the store interface.
-            self.set_len(Store::len(self) + width);
-        }
-
-        // Ensure every element is accounted for.
-        ensure!(
-            Store::len(self) == get_merkle_tree_len(leafs, branches)?,
-            "Invalid merkle tree length"
-        );
-
-        ensure!(row_count == level + 1, "Invalid tree row_count");
-        // The root isn't part of the previous loop so `row_count` is
-        // missing one level.
-
-        // Return the root
-        self.last()
-    }
 }
 
 impl<N: ArrayLength> DiskStore<N> {
-    fn set_len(&mut self, len: usize) {
-        self.len = len;
-    }
-
     // 'store_range' must be the total number of elements in the store
     // (e.g. tree.len()).  Arity/branches is ignored since a
     // DiskStore's size is related only to the number of elements in
@@ -485,13 +378,14 @@ impl<N: ArrayLength> DiskStore<N> {
         Ok(())
     }
 
-    pub fn store_copy_from_slice(&mut self, start: usize, slice: &[u8]) -> Result<()> {
+    pub fn store_copy_from_slice(&self, start: usize, slice: &[u8]) -> Result<()> {
         ensure!(
             start + slice.len() <= self.store_size,
             "Requested slice too large (max: {})",
             self.store_size
         );
-        self.file.write_all_at(start as u64, slice)?;
+        let file: &mut &RandomAccessFile = &mut &self.file;
+        file.write_all_at(start as u64, slice)?;
 
         Ok(())
     }

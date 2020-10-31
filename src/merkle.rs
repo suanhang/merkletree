@@ -800,7 +800,7 @@ impl<
         leafs: usize,
         row_count: usize,
     ) -> Result<MerkleTree<A, VecStore<A::OutputSize>, BaseTreeArity>> {
-        let root = VecStore::build::<A, BaseTreeArity>(&mut data, dbg!(leafs), row_count, None)?;
+        let root = VecStore::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
         let branches = BaseTreeArity::to_usize();
 
         let tree_len = get_merkle_tree_len(leafs, branches)?;
@@ -1142,7 +1142,8 @@ impl<
                     segment_end,
                     &mut data_copy,
                 )?;
-                let partial_store = VecStore::new_from_slice(segment_width, &data_copy)?;
+                let size = get_merkle_tree_len(segment_width, branches)?;
+                let partial_store = VecStore::new_from_slice(size, &data_copy)?;
                 ensure!(
                     Store::len(&partial_store) == segment_width,
                     "Inconsistent store length: {} != {}",
@@ -1431,13 +1432,13 @@ impl<
         start: usize,
         end: usize,
     ) -> Result<Vec<GenericArray<u8, A::OutputSize>>> {
-        ensure!(dbg!(start) < dbg!(end), "start must be less than end");
+        ensure!(start < end, "start must be less than end");
         ensure!(self.data.store().is_some(), "store data required");
 
         let mut out = vec![0u8; (end - start) * A::OutputSize::to_usize()];
         self.read_range_into(start, end, &mut out)?;
 
-        Ok(dbg!(out)
+        Ok(out
             .chunks_exact(A::OutputSize::to_usize())
             .map(Into::into)
             .cloned()
@@ -1520,11 +1521,10 @@ impl<
             "branches MUST be a power of 2"
         );
 
-        let size = get_merkle_tree_len(dbg!(leafs_count), dbg!(branches))?;
+        let size = get_merkle_tree_len(leafs_count, branches)?;
         let row_count = get_merkle_tree_row_count(leafs_count, branches);
 
-        let mut data =
-            S::new_from_slice(dbg!(size), dbg!(leafs)).context("failed to create data store")?;
+        let mut data = S::new_from_slice(size, leafs).context("failed to create data store")?;
 
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs_count, row_count, None)?;
 
@@ -1698,6 +1698,7 @@ impl<
         let mut data = S::new(size).context("failed to create data store")?;
         populate_data::<A, S, BaseTreeArity, _, I>(&mut data, iter)
             .context("failed to populate data")?;
+
         let root = S::build::<A, BaseTreeArity>(&mut data, leafs, row_count, None)?;
 
         Ok(MerkleTree {
@@ -1947,10 +1948,7 @@ pub fn populate_data<
         a.reset();
         buf.extend(a.leaf(item).as_ref());
         if buf.len() >= BUILD_DATA_BLOCK_SIZE * <A as Digest>::OutputSize::to_usize() {
-            let data_len = data.len();
-            // FIXME: Integrate into `len()` call into `copy_from_slice`
-            // once we update to `stable` 1.36.
-            data.copy_from_slice(&buf, data_len)?;
+            data.copy_from_slice(&buf, data.len())?;
             buf.clear();
         }
     }
