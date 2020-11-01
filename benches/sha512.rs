@@ -9,7 +9,7 @@ use digest::Digest;
 use merkletree::forward_digest_impl;
 use merkletree::hash::Algorithm;
 use merkletree::merkle::{FromIndexedParallelIterator, MerkleTree};
-use merkletree::store::{DiskStore, VecStore};
+use merkletree::store::{DiskStore, MmapStore, VecStore};
 use rand::prelude::*;
 use rand::thread_rng;
 use rayon::prelude::*;
@@ -47,8 +47,8 @@ fn tree_5() -> impl Iterator<Item = Result<Hash512>> {
     })
 }
 
-fn tree_160_par() -> impl IndexedParallelIterator<Item = Hash512> {
-    let mut values = vec![[0u8; 256]; 160];
+fn tree_256_par() -> impl IndexedParallelIterator<Item = Hash512> {
+    let mut values = vec![[0u8; 256]; 256];
 
     let mut rng = thread_rng();
     for i in 0..values.len() {
@@ -62,8 +62,8 @@ fn tree_160_par() -> impl IndexedParallelIterator<Item = Hash512> {
     })
 }
 
-fn tree_160() -> impl Iterator<Item = Result<Hash512>> {
-    let mut values = vec![[0u8; 256]; 160];
+fn tree_256() -> impl Iterator<Item = Result<Hash512>> {
+    let mut values = vec![[0u8; 256]; 256];
 
     let mut rng = thread_rng();
     for i in 0..values.len() {
@@ -77,8 +77,8 @@ fn tree_160() -> impl Iterator<Item = Result<Hash512>> {
     })
 }
 
-fn tree_30000() -> impl Iterator<Item = Result<Hash512>> {
-    let mut values = vec![[0u8; 256]; 30000];
+fn tree_32768() -> impl Iterator<Item = Result<Hash512>> {
+    let mut values = vec![[0u8; 256]; 32768];
 
     let mut rng = thread_rng();
     for i in 0..values.len() {
@@ -92,8 +92,8 @@ fn tree_30000() -> impl Iterator<Item = Result<Hash512>> {
     })
 }
 
-fn tree_30000_par() -> impl IndexedParallelIterator<Item = Hash512> {
-    let mut values = vec![[0u8; 256]; 30000];
+fn tree_32768_par() -> impl IndexedParallelIterator<Item = Hash512> {
+    let mut values = vec![[0u8; 256]; 32768];
 
     let mut rng = thread_rng();
     for i in 0..values.len() {
@@ -150,38 +150,53 @@ fn bench_sha512_from_data_5_proof_check(b: &mut Bencher) {
 }
 
 #[bench]
-fn bench_sha512_from_data_160_vec(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::try_from_iter(tree_160()).unwrap());
+fn bench_sha512_from_data_256_vec(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::try_from_iter(tree_256()).unwrap());
 }
 
 #[bench]
-fn bench_sha512_from_data_160_mmap(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, DiskStore<_>>::try_from_iter(tree_160()).unwrap());
+fn bench_sha512_from_data_256_disk(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, DiskStore<_>>::try_from_iter(tree_256()).unwrap());
 }
 
 #[bench]
-fn bench_sha512_from_data_160_par(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::from_par_iter(tree_160_par()));
+fn bench_sha512_from_data_256_mmap(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, MmapStore<_>>::try_from_iter(tree_256()).unwrap());
 }
 
 #[bench]
-fn bench_sha512_from_data_30000_vec(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::try_from_iter(tree_30000()).unwrap());
+fn bench_sha512_from_data_256_par(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::from_par_iter(tree_256_par()));
 }
 
 #[bench]
-fn bench_sha512_from_data_30000_mmap(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, DiskStore<_>>::try_from_iter(tree_30000()).unwrap());
+fn bench_sha512_from_data_32768_vec(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::try_from_iter(tree_32768()).unwrap());
 }
 
 #[bench]
-fn bench_sha512_from_data_30000_par(b: &mut Bencher) {
-    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::from_par_iter(tree_30000_par()));
+fn bench_sha512_from_data_32768_disk(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, DiskStore<_>>::try_from_iter(tree_32768()).unwrap());
 }
 
 #[bench]
-fn bench_sha512_from_data_160_proof(b: &mut Bencher) {
-    let tree: MerkleTree<ASha512, VecStore<_>> = MerkleTree::try_from_iter(tree_160()).unwrap();
+fn bench_sha512_from_data_32768_mmap(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, MmapStore<_>>::try_from_iter(tree_32768()).unwrap());
+}
+
+#[bench]
+fn bench_sha512_from_data_32768_mmap_par(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, MmapStore<_>>::from_par_iter(tree_32768_par()).unwrap());
+}
+
+#[bench]
+fn bench_sha512_from_data_32768_par(b: &mut Bencher) {
+    b.iter(|| MerkleTree::<ASha512, VecStore<_>>::from_par_iter(tree_32768_par()));
+}
+
+#[bench]
+fn bench_sha512_from_data_256_proof(b: &mut Bencher) {
+    let tree: MerkleTree<ASha512, VecStore<_>> = MerkleTree::try_from_iter(tree_256()).unwrap();
 
     b.iter(|| {
         for i in 0..tree.len() {
@@ -192,8 +207,8 @@ fn bench_sha512_from_data_160_proof(b: &mut Bencher) {
 }
 
 #[bench]
-fn bench_sha512_from_data_160_proof_check(b: &mut Bencher) {
-    let tree: MerkleTree<ASha512, VecStore<_>> = MerkleTree::try_from_iter(tree_160()).unwrap();
+fn bench_sha512_from_data_256_proof_check(b: &mut Bencher) {
+    let tree: MerkleTree<ASha512, VecStore<_>> = MerkleTree::try_from_iter(tree_256()).unwrap();
     let proofs = (0..tree.len())
         .map(|i| tree.gen_proof(i).unwrap())
         .collect::<Vec<_>>();
