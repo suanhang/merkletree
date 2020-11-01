@@ -75,4 +75,40 @@ pub trait Algorithm: Digest {
     }
 }
 
-impl<D: Digest> Algorithm for D {}
+#[macro_export]
+macro_rules! forward_digest_impl {
+    ($src:ty, $original:ty) => {
+        impl digest::FixedOutputDirty for $src {
+            type OutputSize = <$original as digest::FixedOutputDirty>::OutputSize;
+
+            fn finalize_into_dirty(
+                &mut self,
+                out: &mut generic_array::GenericArray<u8, Self::OutputSize>,
+            ) {
+                digest::FixedOutputDirty::finalize_into_dirty(&mut self.0, out)
+            }
+        }
+
+        impl digest::Update for $src {
+            fn update(&mut self, data: impl AsRef<[u8]>) {
+                digest::Update::update(&mut self.0, data)
+            }
+
+            fn chain(mut self, data: impl AsRef<[u8]>) -> Self
+            where
+                Self: Sized,
+            {
+                let current = std::mem::take(&mut self.0);
+                let new = digest::Update::chain(current, data);
+                self.0 = new;
+                self
+            }
+        }
+
+        impl digest::Reset for $src {
+            fn reset(&mut self) {
+                digest::Reset::reset(&mut self.0);
+            }
+        }
+    };
+}

@@ -1,3 +1,4 @@
+use crate::hash::Algorithm;
 use crate::merkle::MerkleTree;
 use crate::store::VecStore;
 use digest::{Digest, FixedOutputDirty, Reset, Update};
@@ -18,6 +19,8 @@ pub struct XOR128 {
     data: Item,
     i: usize,
 }
+
+impl Algorithm for XOR128 {}
 
 impl FixedOutputDirty for XOR128 {
     type OutputSize = typenum::U16;
